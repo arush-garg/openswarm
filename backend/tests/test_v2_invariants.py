@@ -680,6 +680,7 @@ def test_transient_capacity_patterns():
     from backend.apps.agents.agent_manager import _TRANSIENT_CAPACITY_PATTERNS, _NON_TRANSIENT_PATTERNS
     transients = [
         "Error 429: rate_limit_error",
+        'API Error: Request rejected (429) · [openai-compatible-chat-636a324c-ac32-4af2-b9bc-79bdffa0bf42/deepseek-ai/deepseek-v4-pro] [429]: {"status":429,"title":"Too Many Requests"} (reset after 1m 4s)',
         "503 Service Unavailable",
         "Service is at capacity",
         "Try again shortly",
@@ -695,6 +696,34 @@ def test_transient_capacity_patterns():
         if "429" in t and "rate_limit" in t.lower():
             # rate_limit_error is transient; non-transient should not match this exact text
             assert not _NON_TRANSIENT_PATTERNS.search(t)
+
+
+def test_custom_provider_fallback_picks_another_provider():
+    """The second retry should move off the current custom provider."""
+    from types import SimpleNamespace
+
+    from backend.apps.agents.agent_manager import _pick_custom_provider_fallback_model
+
+    settings = SimpleNamespace(
+        anthropic_api_key=None,
+        custom_providers=[
+            SimpleNamespace(
+                name="Nvidia Personal",
+                base_url="https://integrate.api.nvidia.com/v1",
+                models=[{"value": "deepseek-ai/deepseek-v4-pro"}],
+            ),
+            SimpleNamespace(
+                name="Groq",
+                base_url="https://api.groq.com/openai/v1",
+                models=[{"value": "llama-3.3-70b-versatile"}],
+            ),
+        ],
+    )
+
+    fallback = _pick_custom_provider_fallback_model(settings, "custom/nvidia-personal/deepseek-ai/deepseek-v4-pro")
+    assert fallback is not None
+    assert fallback != "custom/nvidia-personal/deepseek-ai/deepseek-v4-pro"
+    assert fallback.startswith("custom/groq/")
 
 
 def test_long_context_does_not_match_normal_429():
