@@ -38,9 +38,9 @@ BUILTIN_TOOLS: list[BuiltinTool] = [
         name="Agent",
         display_name="CreateAgent",
         description=(
-            "Spawn a sub-agent to handle a complex subtask. "
-            "Use persistence='persistent' (or persistent=true) to create a persistent subagent; "
-            "omit it for a temporary subagent."
+            "Spawn a sub-agent to handle a complex subtask. The supported OpenSwarm path is the "
+            "backend CreateAgent MCP tool. Use persistence='persistent' (or persistent=true) to "
+            "create a persistent subagent; omit it for a temporary subagent."
         ),
         category="agents",
     ),

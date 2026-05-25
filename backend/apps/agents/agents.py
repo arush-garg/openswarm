@@ -67,6 +67,68 @@ async def launch_agent(config: AgentConfig):
     return {"session_id": session.id, "session": session.model_dump(mode="json")}
 
 
+@agents.router.post("/create")
+async def create_agent(body: dict):
+    parent_session_id = body.get("parent_session_id") or body.get("sender_session_id")
+    prompt = body.get("prompt") or body.get("task") or ""
+    if not parent_session_id:
+        raise HTTPException(status_code=400, detail="parent_session_id is required")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    parent = agent_manager.get_session(parent_session_id)
+    if not parent:
+        try:
+            parent = await agent_manager.resume_session(parent_session_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Parent session not found")
+
+    persistence_raw = body.get("persistence", body.get("persistent"))
+    is_persistent = False
+    if isinstance(persistence_raw, str):
+        is_persistent = persistence_raw.strip().lower() in ("persistent", "persist", "true", "yes")
+    elif isinstance(persistence_raw, bool):
+        is_persistent = persistence_raw
+
+    mode = body.get("mode") or ("agent" if is_persistent else "sub-agent")
+    system_prompt = body.get("system_prompt")
+    if system_prompt is None and is_persistent:
+        system_prompt = parent.system_prompt
+
+    config = AgentConfig(
+        name=body.get("name") or f"{parent.name} Child",
+        model=body.get("model") or parent.model,
+        mode=mode,
+        provider=body.get("provider") or parent.provider,
+        system_prompt=system_prompt,
+        allowed_tools=list(parent.allowed_tools),
+        dashboard_id=body.get("dashboard_id") or parent.dashboard_id,
+        parent_session_id=parent.id,
+        is_persistent=is_persistent,
+        target_directory=body.get("target_directory") or parent.cwd,
+        max_turns=body.get("max_turns"),
+    )
+
+    session = await agent_manager.launch_agent(config)
+    session.parent_session_id = parent.id
+    session.is_persistent = is_persistent
+
+    await agent_manager.send_message(
+        session.id,
+        prompt,
+        mode=body.get("message_mode") or body.get("mode"),
+        model=body.get("message_model") or body.get("model"),
+        images=body.get("images"),
+        context_paths=body.get("context_paths"),
+        forced_tools=body.get("forced_tools"),
+        attached_skills=body.get("attached_skills"),
+        selected_browser_ids=body.get("selected_browser_ids"),
+        client_message_id=body.get("client_message_id"),
+    )
+
+    return {"session_id": session.id, "session": session.model_dump(mode="json")}
+
+
 
 
 @agents.router.post("/sessions/{session_id}/message")
