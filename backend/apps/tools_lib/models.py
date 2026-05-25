@@ -37,11 +37,22 @@ BUILTIN_TOOLS: list[BuiltinTool] = [
     BuiltinTool(
         name="Agent",
         display_name="CreateAgent",
-        description="Spawn a sub-agent to handle a complex subtask. Supports persistence via persistence='persistent'.",
+        description=(
+            "Spawn a sub-agent to handle a complex subtask. "
+            "Use persistence='persistent' (or persistent=true) to create a persistent subagent; "
+            "omit it for a temporary subagent."
+        ),
         category="agents",
     ),
     BuiltinTool(name="InvokeAgent", description="Invoke a copy of an existing agent with a new message, preserving full conversation context", category="agents"),
-    BuiltinTool(name="SendToAgent", description="Route a message to another persistent agent session", category="agents"),
+    BuiltinTool(
+        name="SendToAgent",
+        description=(
+            "Route a message to another persistent agent session. "
+            "Only persistent agents should use this tool."
+        ),
+        category="agents",
+    ),
     # Browser delegation tools (Layer 1 — what the main agent calls)
     BuiltinTool(name="CreateBrowserAgent", description="Create a new browser and run a task on it", category="browser_delegation"),
     BuiltinTool(name="BrowserAgent", description="Delegate a browser task to an existing browser agent", category="browser_delegation"),
