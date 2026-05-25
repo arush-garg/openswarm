@@ -12,8 +12,9 @@ import {
 } from '@mui/material';
 import GoogleIcon from '@mui/icons-material/Google';
 import EmailIcon from '@mui/icons-material/Email';
-import { useAppSelector } from '@/shared/hooks';
+import { useAppDispatch, useAppSelector } from '@/shared/hooks';
 import { useClaudeTokens } from '@/shared/styles/ThemeContext';
+import { activateSignin, fetchSettings } from '@/shared/state/settingsSlice';
 import { OPENSWARM_DEFAULT_PROXY_URL, API_BASE } from '@/shared/config';
 import { report } from '@/shared/serviceClient';
 
@@ -22,6 +23,7 @@ type Stage = 'choose' | 'email_form' | 'code_form';
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 export default function SignInGate(): JSX.Element {
+  const dispatch = useAppDispatch();
   const tokens = useClaudeTokens();
   const proxyUrl = useAppSelector(
     (s) => s.settings.data.openswarm_proxy_url || OPENSWARM_DEFAULT_PROXY_URL,
@@ -36,19 +38,108 @@ export default function SignInGate(): JSX.Element {
 
   const cloudBase = proxyUrl.replace(/\/$/, '');
 
-  const onGoogle = () => {
+  const activateGoogleSignin = async (token: string, email?: string | null): Promise<void> => {
+    await dispatch(
+      activateSignin({
+        token,
+        email: email ?? undefined,
+        signin_method: 'google',
+      }),
+    ).unwrap();
+  };
+
+  const resolveInstallId = async (): Promise<string> => {
+    // Normal path (Electron + authenticated settings fetch).
+    if (typeof installId === 'string' && installId.length >= 8 && installId.length <= 128) {
+      return installId;
+    }
+
+    // Browser-only dev fallback: fetch a minimal public install-id route.
+    try {
+      const r = await fetch(`${API_BASE}/settings/install-id`);
+      if (r.ok) {
+        const data = (await r.json()) as { install_id?: string };
+        if (
+          typeof data.install_id === 'string' &&
+          data.install_id.length >= 8 &&
+          data.install_id.length <= 128
+        ) {
+          return data.install_id;
+        }
+      }
+    } catch {
+      // Fall through to local temporary ID.
+    }
+
+    // Last resort: keep sign-in usable even if the backend route is unreachable.
+    const key = 'openswarm_install_id_fallback';
+    try {
+      const existing = window.localStorage.getItem(key) || '';
+      if (existing.length >= 8 && existing.length <= 128) return existing;
+      const fresh =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+      window.localStorage.setItem(key, fresh);
+      return fresh;
+    } catch {
+      return `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+    }
+  };
+
+  const onGoogle = async () => {
     report('signin', 'google_clicked');
+    const resolvedInstallId = await resolveInstallId();
     const localPort = (window as any).__OPENSWARM_PORT__ || 8324;
     const params = new URLSearchParams({
-      install_id: installId,
+      install_id: resolvedInstallId,
       local_port: String(localPort),
     });
-    const startUrl = `${cloudBase}/api/auth/google/start?${params.toString()}`;
     const api = (window as any).openswarm;
     if (api?.openExternal) {
+      const startUrl = `${cloudBase}/api/auth/google/start?${params.toString()}`;
       api.openExternal(startUrl);
     } else {
-      window.open(startUrl, '_blank');
+      // Plain browser mode has no Electron protocol handler, so do not use
+      // api.openswarm.com's openswarm:// success page. Complete OAuth through
+      // the local backend callback instead.
+      const startUrl = `${API_BASE}/auth/google/start?${params.toString()}`;
+      const popup = window.open(startUrl, 'openswarm-google-signin', 'width=560,height=720');
+      const cloudOrigin = new URL(cloudBase).origin;
+      const localOrigin = new URL(API_BASE).origin;
+      let completed = false;
+
+      const cleanup = () => {
+        window.removeEventListener('message', onMessage);
+        if (popup && !popup.closed) popup.close();
+      };
+
+      const onMessage = async (event: MessageEvent) => {
+        if (event.origin !== cloudOrigin && event.origin !== localOrigin) return;
+        const payload = event.data;
+        const callbackData = payload?.type === 'oauth_callback' ? payload.data : payload;
+        const token = callbackData?.token || callbackData?.bearer || callbackData?.access_token;
+        if ((callbackData?.ok || callbackData?.local) && !token) {
+          await dispatch(fetchSettings()).unwrap();
+          completed = true;
+          cleanup();
+          return;
+        }
+        if (!token || completed) return;
+        completed = true;
+        try {
+          await activateGoogleSignin(token, callbackData?.email || callbackData?.user_email || null);
+          cleanup();
+        } catch (err) {
+          setErrMsg((err as Error).message || 'Sign-in failed.');
+          cleanup();
+        }
+      };
+
+      window.addEventListener('message', onMessage);
+      window.setTimeout(() => {
+        if (!completed) cleanup();
+      }, 180000);
     }
   };
 
@@ -104,6 +195,7 @@ export default function SignInGate(): JSX.Element {
     setBusy(true);
     try {
       report('signin', 'email_verify_submitted');
+      const resolvedInstallId = await resolveInstallId();
       const localPort = (window as any).__OPENSWARM_PORT__ || 8324;
       const res = await fetch(`${cloudBase}/api/auth/email/verify`, {
         method: 'POST',
@@ -111,7 +203,7 @@ export default function SignInGate(): JSX.Element {
         body: JSON.stringify({
           email: email.trim(),
           code,
-          install_id: installId,
+          install_id: resolvedInstallId,
           local_port: localPort,
         }),
       });
@@ -121,21 +213,15 @@ export default function SignInGate(): JSX.Element {
       }
       const data = (await res.json()) as { bearer?: string; user_id?: string; user_email?: string };
       if (!data.bearer) throw new Error('Server did not return a bearer.');
-      // Hand bearer to local backend like Google's handoff page so the app converges identically.
-      const activate = await fetch(`${API_BASE}/auth/signin-activate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      // Hand the bearer to the local backend and immediately refresh Redux
+      // settings so the gate dismisses as soon as the code is accepted.
+      await dispatch(
+        activateSignin({
           token: data.bearer,
           email: data.user_email,
           signin_method: 'email',
         }),
-      });
-      if (!activate.ok) {
-        const text = await activate.text().catch(() => '');
-        throw new Error(text || `Local activate failed (${activate.status})`);
-      }
-      // SignInGateLoader's 2s poll picks up new user_id and unmounts the gate.
+      ).unwrap();
     } catch (err) {
       setErrMsg((err as Error).message || 'Verification failed.');
     } finally {

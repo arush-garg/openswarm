@@ -9,6 +9,7 @@ export const OPENSWARM_DEFAULT_PROXY_URL = 'https://api.openswarm.com';
 // Per-install token from Electron preload; cached after first resolve. Call refreshAuthToken() on 4401.
 let _authTokenCache: string = '';
 let _authTokenPromise: Promise<string> | null = null;
+let _originalFetchForAuth: typeof window.fetch | null = null;
 
 export function getAuthToken(): string {
   return _authTokenCache;
@@ -20,6 +21,25 @@ export async function refreshAuthToken(): Promise<string> {
     try {
       const tok = await ow.getAuthToken();
       _authTokenCache = typeof tok === 'string' ? tok : '';
+    } catch {
+      _authTokenCache = '';
+    }
+  } else {
+    // Plain browser mode has no Electron preload bridge. Bootstrap the same
+    // per-install bearer from a localhost-origin-gated backend endpoint so
+    // normal API calls (/api/settings, /ws, etc.) can authenticate.
+    try {
+      const fetchForAuth = _originalFetchForAuth ?? window.fetch.bind(window);
+      const resp = await fetchForAuth(`${API_BASE}/auth/browser-token`, {
+        method: 'GET',
+        credentials: 'include',
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as { token?: string };
+        _authTokenCache = typeof data.token === 'string' ? data.token : '';
+      } else {
+        _authTokenCache = '';
+      }
     } catch {
       _authTokenCache = '';
     }
@@ -45,6 +65,7 @@ function _installAuthFetchInterceptor() {
   (window as any).__OPENSWARM_FETCH_PATCHED__ = true;
 
   const originalFetch = window.fetch.bind(window);
+  _originalFetchForAuth = originalFetch;
   window.fetch = async function patchedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     try {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
