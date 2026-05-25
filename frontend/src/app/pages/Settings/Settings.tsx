@@ -1,9 +1,32 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
 import Snackbar from '@mui/material/Snackbar';
 import Alert from '@mui/material/Alert';
 import Dialog from '@mui/material/Dialog';
 import DialogContent from '@mui/material/DialogContent';
+import FormControl from '@mui/material/FormControl';
+import LinearProgress from '@mui/material/LinearProgress';
+import ListSubheader from '@mui/material/ListSubheader';
+import MenuItem from '@mui/material/MenuItem';
+import Select from '@mui/material/Select';
+import Slider from '@mui/material/Slider';
+import Switch from '@mui/material/Switch';
+import TextField from '@mui/material/TextField';
+import ToggleButton from '@mui/material/ToggleButton';
+import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
+import Typography from '@mui/material/Typography';
+import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import DarkModeIcon from '@mui/icons-material/DarkMode';
+import DownloadIcon from '@mui/icons-material/Download';
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import FolderOpenIcon from '@mui/icons-material/FolderOpen';
+import KeyboardIcon from '@mui/icons-material/Keyboard';
+import LanguageIcon from '@mui/icons-material/Language';
+import LightModeIcon from '@mui/icons-material/LightMode';
+import RestartAltIcon from '@mui/icons-material/RestartAlt';
+import SystemUpdateAltIcon from '@mui/icons-material/SystemUpdateAlt';
 import { useAppDispatch, useAppSelector } from '@/shared/hooks';
 import { updateSettings, closeSettingsModal, resetSystemPrompt, disconnectSubscription, signOut, activateSignin, fetchSettings, setDraft, clearDraft, detectOpenclawPath, AppSettings, CustomProvider, DEFAULT_SYSTEM_PROMPT } from '@/shared/state/settingsSlice';
 import { onboardingBus } from '@/app/components/Onboarding/eventBus';
@@ -14,11 +37,20 @@ import DirectoryBrowser from '@/app/components/editor/DirectoryBrowser';
 import { CommandsContent } from '@/app/pages/Commands/Commands';
 import GeneralTab from './sections/general/GeneralTab';
 import ModelsTab from './sections/models/ModelsTab';
+import GeneralInterface from './sections/general/GeneralInterface';
+import GeneralAdvanced from './sections/general/GeneralAdvanced';
 import UsageStats from './sections/usage/UsageStats';
 import SettingsHeader from './sections/SettingsHeader';
 import SettingsFooter from './sections/SettingsFooter';
 import ConfirmDiscardDialog from './sections/ConfirmDiscardDialog';
 import { makeSettingsStyles } from './sections/settingsStyles';
+import { API_BASE, OPENSWARM_DEFAULT_PROXY_URL } from '@/shared/config';
+import PlanPicker from '@/app/components/overlays/PlanPicker';
+import TrustedFilePatterns from '@/app/components/overlays/TrustedFilePatterns';
+import { report } from '@/shared/serviceClient';
+import { resetTour } from '@/shared/state/onboardingProgressSlice';
+import { selectSubscriptionConnections, fetchSubscriptionStatus, setSubscriptionStatus } from '@/shared/state/subscriptionsSlice';
+import { OpenSwarmPlan } from '@/shared/subscription/checkout';
 
 // Brand colors for provider group headers; mirrors ChatInput picker.
 const PROVIDER_COLORS: Record<string, string> = {
@@ -1046,239 +1078,6 @@ const PixelBarOuter: React.FC<{ value: number; max: number; width?: number; pale
   );
 };
 
-// ── Usage Stats Component ──
-const UsageStats: React.FC = () => {
-  const c = useClaudeTokens();
-  const [stats, setStats] = useState<any>(null);
-
-  useEffect(() => {
-    fetch(`${API_BASE}/service/usage-summary`)
-      .then(r => r.json())
-      .then(setStats)
-      .catch(() => {});
-  }, []);
-
-  if (!stats) {
-    // Skeleton loading state
-    const skeletonPulse = {
-      animation: 'skeleton-pulse 1.5s ease-in-out infinite',
-      '@keyframes skeleton-pulse': { '0%, 100%': { opacity: 0.5 }, '50%': { opacity: 0.25 } },
-    };
-    const skeletonCard = {
-      p: 1.5, borderRadius: `${c.radius.md}px`, bgcolor: c.bg.elevated,
-      border: `1px solid ${c.border.subtle}`, ...skeletonPulse,
-    };
-    return (
-      <Box sx={{ mb: 2.5 }}>
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, mb: 1 }}>
-          {Array.from({ length: 4 }, (_, i) => (
-            <Box key={i} sx={skeletonCard}>
-              <Box sx={{ width: 60, height: 8, bgcolor: c.border.subtle, borderRadius: 1, mb: 1 }} />
-              <Box sx={{ width: 50, height: 18, bgcolor: c.border.subtle, borderRadius: 1, mb: 0.5 }} />
-              <Box sx={{ width: 90, height: 8, bgcolor: c.border.subtle, borderRadius: 1 }} />
-            </Box>
-          ))}
-        </Box>
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, mb: 1.5 }}>
-          {Array.from({ length: 4 }, (_, i) => (
-            <Box key={i} sx={skeletonCard}>
-              <Box sx={{ width: 70, height: 8, bgcolor: c.border.subtle, borderRadius: 1, mb: 1 }} />
-              <Box sx={{ width: 45, height: 18, bgcolor: c.border.subtle, borderRadius: 1, mb: 0.5 }} />
-              <Box sx={{ width: 80, height: 8, bgcolor: c.border.subtle, borderRadius: 1 }} />
-            </Box>
-          ))}
-        </Box>
-        <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5 }}>
-          {Array.from({ length: 2 }, (_, i) => (
-            <Box key={i} sx={{ ...skeletonCard, p: 2 }}>
-              <Box sx={{ width: 80, height: 8, bgcolor: c.border.subtle, borderRadius: 1, mb: 2 }} />
-              {Array.from({ length: 3 }, (_, j) => (
-                <Box key={j} sx={{ mb: 1.5 }}>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
-                    <Box sx={{ width: 60 + j * 15, height: 10, bgcolor: c.border.subtle, borderRadius: 1 }} />
-                    <Box sx={{ width: 35, height: 10, bgcolor: c.border.subtle, borderRadius: 1 }} />
-                  </Box>
-                  <Box sx={{ display: 'flex', gap: '1px' }}>
-                    {Array.from({ length: 16 }, (_, k) => (
-                      <Box key={k} sx={{ width: 5, height: 5, bgcolor: c.border.subtle, opacity: k < 8 - j * 2 ? 0.6 : 0.2 }} />
-                    ))}
-                  </Box>
-                </Box>
-              ))}
-            </Box>
-          ))}
-        </Box>
-      </Box>
-    );
-  }
-
-  const formatCost = (v: number) => {
-    if (v === 0) return '$0.00';
-    if (v < 0.001) return `$${v.toFixed(6)}`;
-    if (v < 0.01) return `$${v.toFixed(5)}`;
-    if (v < 1) return `$${v.toFixed(4)}`;
-    return `$${v.toFixed(2)}`;
-  };
-  const formatDuration = (s: number) => {
-    if (s === 0) return '0s';
-    if (s < 60) return `${s.toFixed(1)}s`;
-    if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
-    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-  };
-  const formatTotalTime = (s: number) => {
-    if (s < 60) return `${s.toFixed(1)}s`;
-    if (s < 3600) return `${(s / 60).toFixed(1)} min`;
-    return `${(s / 3600).toFixed(1)} hrs`;
-  };
-
-  const cardSx = {
-    p: 1.5,
-    borderRadius: `${c.radius.md}px`,
-    bgcolor: c.bg.elevated,
-    border: `1px solid ${c.border.subtle}`,
-  };
-  const labelSx = { fontSize: '0.58rem', fontWeight: 700, color: c.text.ghost, textTransform: 'uppercase' as const, letterSpacing: '0.06em', mb: 0.25 };
-  const valueSx = { fontSize: '1.05rem', fontWeight: 700, color: c.text.primary, lineHeight: 1.2 };
-  const subSx = { fontSize: '0.62rem', color: c.text.tertiary, mt: 0.25 };
-
-  const modelEntries = Object.entries(stats.models_used || {}).sort((a: any, b: any) => b[1] - a[1]) as [string, number][];
-  const providerEntries = Object.entries(stats.providers_used || {}).sort((a: any, b: any) => b[1] - a[1]) as [string, number][];
-  const toolEntries = Object.entries(stats.top_tools || {}).slice(0, 10) as [string, number][];
-  const maxToolCount = toolEntries.length > 0 ? Math.max(...toolEntries.map(([, c]) => c)) : 1;
-  const statusEntries = Object.entries(stats.status_breakdown || {}) as [string, string][];
-
-  // Pixel bar helper that passes tokens
-  const PixelBar: React.FC<{ value: number; max: number; width?: number; palette?: string[] }> = (props) => (
-    <PixelBarOuter {...props} tokens={c} />
-  );
-
-  const totalTime = stats.avg_duration_seconds * stats.total_sessions;
-  const msgsPerSession = stats.total_sessions > 0 ? (stats.total_messages / stats.total_sessions).toFixed(1) : '0';
-  const toolsPerSession = stats.total_sessions > 0 ? (stats.total_tool_calls / stats.total_sessions).toFixed(1) : '0';
-  const formatTokens = (n: number) => {
-    if (n === 0) return '0';
-    if (n < 1000) return String(n);
-    if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
-    return `${(n / 1_000_000).toFixed(2)}M`;
-  };
-  const isSubscription = stats.cost_source === '9router';
-  const costSourceLabel = isSubscription ? 'saved with your subscription' : stats.cost_source === 'sdk' ? 'via API' : '';
-
-  return (
-    <Box sx={{ mb: 2.5 }}>
-      {/* Row 1: Core metrics */}
-      <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, mb: 1 }}>
-        <Box sx={cardSx}>
-          <Typography sx={labelSx}>Total Sessions</Typography>
-          <Typography sx={valueSx}>{stats.total_sessions.toLocaleString()}</Typography>
-          <Typography sx={subSx}>
-            {statusEntries.map(([s, n]) => `${n} ${s}`).join(', ') || 'no sessions'}
-          </Typography>
-        </Box>
-        <Box sx={cardSx}>
-          <Typography sx={labelSx}>{isSubscription ? 'You Saved' : 'Total Cost'}</Typography>
-          <Typography sx={valueSx}>{formatCost(stats.total_cost_usd)}</Typography>
-          <Typography sx={subSx}>
-            {isSubscription
-              ? `${formatCost(stats.avg_cost_per_session)} avg · saved with your subscription`
-              : costSourceLabel ? `${formatCost(stats.avg_cost_per_session)} avg · ${costSourceLabel}` : 'no cost data'}
-          </Typography>
-        </Box>
-        <Box sx={cardSx}>
-          <Typography sx={labelSx}>Total Messages</Typography>
-          <Typography sx={valueSx}>{stats.total_messages.toLocaleString()}</Typography>
-          <Typography sx={subSx}>
-            {msgsPerSession} avg per session
-          </Typography>
-        </Box>
-        <Box sx={cardSx}>
-          <Typography sx={labelSx}>Total Tool Calls</Typography>
-          <Typography sx={valueSx}>{stats.total_tool_calls.toLocaleString()}</Typography>
-          <Typography sx={subSx}>
-            {toolsPerSession} avg per session
-          </Typography>
-        </Box>
-      </Box>
-
-      {/* Row 2: Time + efficiency + tokens */}
-      <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, mb: 1.5 }}>
-        <Box sx={cardSx}>
-          <Typography sx={labelSx}>Total Run Time</Typography>
-          <Typography sx={valueSx}>{formatTotalTime(totalTime)}</Typography>
-          <Typography sx={subSx}>across all sessions</Typography>
-        </Box>
-        <Box sx={cardSx}>
-          <Typography sx={labelSx}>Avg Session</Typography>
-          <Typography sx={valueSx}>{formatDuration(stats.avg_duration_seconds)}</Typography>
-          <Typography sx={subSx}>per session duration</Typography>
-        </Box>
-        <Box sx={cardSx}>
-          <Typography sx={labelSx}>Completion Rate</Typography>
-          <Typography sx={valueSx}>{(stats.completion_rate * 100).toFixed(1)}%</Typography>
-          <Typography sx={subSx}>
-            sessions finished successfully
-          </Typography>
-        </Box>
-        <Box sx={cardSx}>
-          <Typography sx={labelSx}>Tokens Used</Typography>
-          <Typography sx={valueSx}>
-            {stats.total_prompt_tokens || stats.total_completion_tokens
-              ? formatTokens((stats.total_prompt_tokens || 0) + (stats.total_completion_tokens || 0))
-              : Object.keys(stats.providers_used || {}).length}
-          </Typography>
-          <Typography sx={subSx}>
-            {stats.total_prompt_tokens || stats.total_completion_tokens
-              ? `${formatTokens(stats.total_prompt_tokens || 0)} in · ${formatTokens(stats.total_completion_tokens || 0)} out`
-              : providerEntries.map(([p]) => p).join(', ') || 'none'}
-          </Typography>
-        </Box>
-      </Box>
-
-      {/* Model + Provider + Tool breakdown */}
-      <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5 }}>
-        {/* Models & Providers */}
-        <Box sx={{ ...cardSx, p: 2 }}>
-          <Typography sx={{ ...labelSx, mb: 1.5 }}>Models Used</Typography>
-          {modelEntries.length > 0 ? modelEntries.map(([model, count]) => {
-            const pct = stats.total_sessions > 0 ? ((count / stats.total_sessions) * 100).toFixed(0) : '0';
-            return (
-              <Box key={model} sx={{ mb: 1 }}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', mb: 0 }}>
-                  <Typography sx={{ fontSize: '0.78rem', color: c.text.muted, fontWeight: 500 }}>{model}</Typography>
-                  <Typography sx={{ fontSize: '0.68rem', color: c.text.tertiary, fontFamily: c.font.mono }}>
-                    {count} ({pct}%)
-                  </Typography>
-                </Box>
-                <PixelBar value={count} max={stats.total_sessions} palette={PIXEL_BLUE} />
-              </Box>
-            );
-          }) : <Typography sx={{ fontSize: '0.75rem', color: c.text.ghost }}>No sessions yet</Typography>}
-        </Box>
-
-        {/* Tools */}
-        <Box sx={{ ...cardSx, p: 2 }}>
-          <Typography sx={{ ...labelSx, mb: 1.5 }}>Top Tools</Typography>
-          {toolEntries.length > 0 ? toolEntries.map(([tool, count]) => {
-            const shortName = tool.includes('__') ? tool.split('__').pop() : tool;
-            const pct = stats.total_tool_calls > 0 ? ((count / stats.total_tool_calls) * 100).toFixed(0) : '0';
-            return (
-              <Box key={tool} sx={{ mb: 1 }}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', mb: 0 }}>
-                  <Typography sx={{ fontSize: '0.72rem', color: c.text.muted, fontWeight: 500 }}>{shortName}</Typography>
-                  <Typography sx={{ fontSize: '0.62rem', color: c.text.tertiary, fontFamily: c.font.mono }}>
-                    {count} call{count !== 1 ? 's' : ''} ({pct}%)
-                  </Typography>
-                </Box>
-                <PixelBar value={count} max={maxToolCount} />
-              </Box>
-            );
-          }) : <Typography sx={{ fontSize: '0.75rem', color: c.text.ghost }}>No tool calls yet</Typography>}
-        </Box>
-      </Box>
-    </Box>
-  );
-};
-
 const API_KEY_STEPS = [
   {
     title: 'Open the Anthropic Console',
@@ -1439,6 +1238,7 @@ const Settings: React.FC = () => {
   }, [settings, dispatch]);
 
   const styles = makeSettingsStyles(c);
+  const { fieldSx, sectionSx, rowSx, rowLastSx, inlineRowSx, inlineRowLastSx, labelSx, descSx } = styles;
 
   return (
     <>
@@ -1704,438 +1504,8 @@ const Settings: React.FC = () => {
           />
         </Box>
 
-        {/* ── Interface ── */}
-        <Typography sx={{ ...sectionSx, mt: 3 }}>Interface</Typography>
-
-        <Box sx={inlineRowSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>Theme</Typography>
-            <Typography sx={descSx}>Application color scheme.</Typography>
-          </Box>
-          <ToggleButtonGroup
-            value={form.theme}
-            exclusive
-            onChange={(_, v) => { if (v) setForm({ ...form, theme: v }); }}
-            size="small"
-            sx={{
-              '& .MuiToggleButton-root': {
-                color: c.text.muted,
-                borderColor: c.border.medium,
-                textTransform: 'none',
-                px: 2,
-                py: 0.5,
-                gap: 0.5,
-                fontSize: '0.8rem',
-                '&.Mui-selected': {
-                  bgcolor: `${c.accent.primary}15`,
-                  color: c.accent.primary,
-                  borderColor: c.accent.primary,
-                  '&:hover': { bgcolor: `${c.accent.primary}20` },
-                },
-              },
-            }}
-          >
-            <ToggleButton value="light">
-              <LightModeIcon sx={{ fontSize: 16 }} /> Light
-            </ToggleButton>
-            <ToggleButton value="dark">
-              <DarkModeIcon sx={{ fontSize: 16 }} /> Dark
-            </ToggleButton>
-          </ToggleButtonGroup>
-        </Box>
-
-        <Box sx={rowSx}>
-          <Typography sx={labelSx}>Zoom sensitivity</Typography>
-          <Typography sx={{ ...descSx, mb: 1 }}>
-            Scroll-to-zoom responsiveness. Lower for trackpads, higher for mouse wheels.
-          </Typography>
-          <Box sx={{ px: 1 }}>
-            <Slider
-              value={form.zoom_sensitivity}
-              onChange={(_, v) => setForm({ ...form, zoom_sensitivity: v as number })}
-              min={1}
-              max={100}
-              step={1}
-              valueLabelDisplay="auto"
-              marks={[
-                { value: 1, label: 'Low' },
-                { value: 50, label: 'Default' },
-                { value: 100, label: 'High' },
-              ]}
-              sx={{
-                color: c.accent.primary,
-                '& .MuiSlider-markLabel': { color: c.text.tertiary, fontSize: '0.7rem' },
-                '& .MuiSlider-valueLabel': { bgcolor: c.accent.primary },
-              }}
-            />
-          </Box>
-        </Box>
-
-        <Box sx={inlineRowSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>New agent shortcut</Typography>
-            <Typography sx={descSx}>Keyboard shortcut to create an agent.</Typography>
-          </Box>
-          <Box
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (!recordingShortcut) return;
-              if (['Meta', 'Control', 'Shift', 'Alt'].includes(e.key)) return;
-              e.preventDefault();
-              const parts: string[] = [];
-              if (e.metaKey) parts.push('Meta');
-              if (e.ctrlKey) parts.push('Ctrl');
-              if (e.altKey) parts.push('Alt');
-              if (e.shiftKey) parts.push('Shift');
-              parts.push(e.key.length === 1 ? e.key.toLowerCase() : e.key);
-              setForm({ ...form, new_agent_shortcut: parts.join('+') });
-              setRecordingShortcut(false);
-            }}
-            onBlur={() => setRecordingShortcut(false)}
-            onClick={() => setRecordingShortcut(true)}
-            sx={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 0.75,
-              px: 1.5,
-              py: 0.75,
-              borderRadius: `${c.radius.sm}px`,
-              border: `1px solid ${recordingShortcut ? c.accent.primary : c.border.medium}`,
-              cursor: 'pointer',
-              outline: 'none',
-              transition: 'border-color 0.15s',
-              '&:hover': { borderColor: c.accent.primary },
-            }}
-          >
-            <KeyboardIcon sx={{ fontSize: 16, color: recordingShortcut ? c.accent.primary : c.text.tertiary }} />
-            {recordingShortcut ? (
-              <Typography sx={{ fontSize: '0.8rem', color: c.accent.primary, fontWeight: 500 }}>
-                Press shortcut…
-              </Typography>
-            ) : (
-              <Typography sx={{ fontSize: '0.8rem', color: c.text.primary, fontFamily: c.font.mono, fontWeight: 500 }}>
-                {form.new_agent_shortcut
-                  .split('+')
-                  .map((p) => {
-                    if (p === 'Meta') return '⌘';
-                    if (p === 'Ctrl') return 'Ctrl';
-                    if (p === 'Alt') return '⌥';
-                    if (p === 'Shift') return '⇧';
-                    return p.toUpperCase();
-                  })
-                  .join(' + ')}
-              </Typography>
-            )}
-          </Box>
-        </Box>
-
-        <Box sx={inlineRowSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>Auto-enable element selection</Typography>
-            <Typography sx={descSx}>Automatically enter element selection mode when creating a new agent.</Typography>
-          </Box>
-          <Switch
-            checked={form.auto_select_mode_on_new_agent}
-            onChange={(e) => setForm({ ...form, auto_select_mode_on_new_agent: e.target.checked })}
-            sx={{
-              '& .MuiSwitch-switchBase.Mui-checked': { color: c.accent.primary },
-              '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: c.accent.primary },
-            }}
-          />
-        </Box>
-
-        <Box sx={inlineRowSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>Default agent spawn state in dashboard</Typography>
-            <Typography sx={descSx}>When enabled, new agents spawn expanded instead of collapsed.</Typography>
-          </Box>
-          <Switch
-            checked={form.expand_new_chats_in_dashboard}
-            onChange={(e) => setForm({ ...form, expand_new_chats_in_dashboard: e.target.checked })}
-            sx={{
-              '& .MuiSwitch-switchBase.Mui-checked': { color: c.accent.primary },
-              '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: c.accent.primary },
-            }}
-          />
-        </Box>
-
-        <Box sx={inlineRowLastSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>Auto-reveal sub-agents on dashboard</Typography>
-            <Typography sx={descSx}>Automatically show sub-agent cards (from CreateAgent / InvokeAgent) tethered to their parent on the dashboard.</Typography>
-          </Box>
-          <Switch
-            checked={form.auto_reveal_sub_agents}
-            onChange={(e) => setForm({ ...form, auto_reveal_sub_agents: e.target.checked })}
-            sx={{
-              '& .MuiSwitch-switchBase.Mui-checked': { color: c.accent.primary },
-              '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: c.accent.primary },
-            }}
-          />
-        </Box>
-
-        {/* ── Browser ── */}
-        <Typography sx={{ ...sectionSx, mt: 3 }}>Browser</Typography>
-
-        <Box sx={rowLastSx}>
-          <Typography sx={labelSx}>Default homepage</Typography>
-          <Typography sx={{ ...descSx, mb: 1.5 }}>
-            URL loaded when opening a new browser card on the dashboard.
-          </Typography>
-          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-            <LanguageIcon sx={{ fontSize: 18, color: c.text.tertiary, flexShrink: 0 }} />
-            <TextField
-              value={form.browser_homepage}
-              onChange={(e) => setForm({ ...form, browser_homepage: e.target.value })}
-              size="small"
-              fullWidth
-              placeholder="https://www.google.com"
-              sx={{
-                ...fieldSx,
-                '& .MuiOutlinedInput-root': {
-                  ...fieldSx['& .MuiOutlinedInput-root'],
-                  fontFamily: c.font.mono,
-                },
-              }}
-            />
-          </Box>
-        </Box>
-
-        {/* ── Dreaming ── */}
-        <Typography sx={{ ...sectionSx, mt: 3 }}>Dreaming</Typography>
-
-        <Box sx={inlineRowSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>Enable OpenClaw dreaming</Typography>
-            <Typography sx={descSx}>Exports completed sessions to OpenClaw corpus and runs scheduled reflection cycles.</Typography>
-          </Box>
-          <Switch
-            checked={Boolean(form.dreaming_enabled)}
-            onChange={(e) => setForm({ ...form, dreaming_enabled: e.target.checked })}
-            sx={{
-              '& .MuiSwitch-switchBase.Mui-checked': { color: c.accent.primary },
-              '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: c.accent.primary },
-            }}
-          />
-        </Box>
-
-        <Box sx={inlineRowSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>Auto-detect OpenClaw path</Typography>
-            <Typography sx={descSx}>Checks common install paths and your PATH via which openclaw.</Typography>
-          </Box>
-          <Switch
-            checked={Boolean(form.openclaw_auto_detect)}
-            onChange={(e) => setForm({ ...form, openclaw_auto_detect: e.target.checked })}
-            sx={{
-              '& .MuiSwitch-switchBase.Mui-checked': { color: c.accent.primary },
-              '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: c.accent.primary },
-            }}
-          />
-        </Box>
-
-        <Box sx={rowSx}>
-          <Typography sx={labelSx}>OpenClaw path</Typography>
-          <Typography sx={{ ...descSx, mb: 1.5 }}>Absolute path to OpenClaw executable or openclaw.mjs file.</Typography>
-          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-            <TextField
-              value={form.openclaw_path ?? ''}
-              onChange={(e) => setForm({ ...form, openclaw_path: e.target.value || null })}
-              size="small"
-              fullWidth
-              placeholder="Auto-detected when available"
-              sx={{
-                ...fieldSx,
-                '& .MuiOutlinedInput-root': {
-                  ...fieldSx['& .MuiOutlinedInput-root'],
-                  fontFamily: c.font.mono,
-                },
-              }}
-            />
-            <Button
-              variant="outlined"
-              onClick={handleDetectOpenclaw}
-              disabled={detectingOpenclaw}
-              sx={{
-                color: c.text.tertiary,
-                borderColor: c.border.medium,
-                textTransform: 'none',
-                whiteSpace: 'nowrap',
-                minWidth: 'auto',
-                fontSize: '0.8rem',
-                '&:hover': { color: c.accent.primary, borderColor: c.accent.primary },
-              }}
-            >
-              {detectingOpenclaw ? 'Detecting...' : 'Detect'}
-            </Button>
-          </Box>
-          {!!form.dreaming_status_message && (
-            <Typography sx={{ ...descSx, mt: 1 }}>{form.dreaming_status_message}</Typography>
-          )}
-        </Box>
-
-        <Box sx={inlineRowLastSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>Dreaming frequency (minutes)</Typography>
-            <Typography sx={descSx}>How often OpenSwarm triggers OpenClaw dreaming cycles while enabled.</Typography>
-          </Box>
-          <TextField
-            type="number"
-            value={form.dreaming_frequency_minutes ?? 1440}
-            onChange={(e) => {
-              const next = parseInt(e.target.value || '1440', 10);
-              setForm({ ...form, dreaming_frequency_minutes: Number.isFinite(next) ? next : 1440 });
-            }}
-            size="small"
-            inputProps={{ min: 5, max: 10080 }}
-            sx={{ ...fieldSx, width: 120 }}
-          />
-        </Box>
-
-        {/* ── Advanced ── */}
-        <Typography sx={{ ...sectionSx, mt: 3 }}>Advanced</Typography>
-
-        <Box sx={inlineRowSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>Developer mode</Typography>
-            <Typography sx={descSx}>Show transport details, environment variables, raw configs, and other technical metadata throughout the app.</Typography>
-          </Box>
-          <Switch
-            checked={form.dev_mode}
-            onChange={(e) => setForm({ ...form, dev_mode: e.target.checked })}
-            sx={{
-              '& .MuiSwitch-switchBase.Mui-checked': { color: c.accent.primary },
-              '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: c.accent.primary },
-            }}
-          />
-        </Box>
-
-        <Box sx={inlineRowLastSx}>
-          <Box sx={{ mr: 3 }}>
-            <Typography sx={labelSx}>Experimental updates</Typography>
-            <Typography sx={descSx}>Receive pre-release builds with new features earlier. These versions may be less stable than normal releases.</Typography>
-          </Box>
-          <Switch
-            checked={form.allow_experimental_updates}
-            onChange={(e) => setForm({ ...form, allow_experimental_updates: e.target.checked })}
-            sx={{
-              '& .MuiSwitch-switchBase.Mui-checked': { color: c.accent.primary },
-              '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: c.accent.primary },
-            }}
-          />
-        </Box>
-
-        {/* About */}
-        <Typography sx={{ ...sectionSx, mt: 3 }}>About</Typography>
-
-        <Box sx={rowSx}>
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Box>
-              <Typography sx={labelSx}>Version</Typography>
-              <Typography sx={{ ...descSx, fontFamily: c.font.mono }}>
-                {appVersion ?? '—'}
-              </Typography>
-            </Box>
-          </Box>
-        </Box>
-
-        <Box sx={rowLastSx}>
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: updateStatus === 'downloading' ? 1 : 0 }}>
-            <Box>
-              <Typography sx={labelSx}>Software update</Typography>
-              <Typography sx={descSx}>
-                {updateStatus === 'checking' && 'Checking for updates…'}
-                {updateStatus === 'not-available' && 'You\'re on the latest version.'}
-                {updateStatus === 'available' && `Version ${availableVersion} is available.`}
-                {updateStatus === 'downloading' && `Downloading update… ${Math.round(downloadPercent)}%`}
-                {updateStatus === 'downloaded' && `Version ${availableVersion} is ready to install.`}
-                {updateStatus === 'error' && (updateError || 'Update check failed.')}
-                {updateStatus === 'idle' && 'Check for new versions of OpenSwarm.'}
-              </Typography>
-            </Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0, ml: 2 }}>
-              {updateStatus === 'checking' && (
-                <CircularProgress size={18} sx={{ color: c.text.tertiary }} />
-              )}
-              {updateStatus === 'not-available' && (
-                <CheckCircleOutlineIcon sx={{ fontSize: 18, color: c.status.success }} />
-              )}
-              {updateStatus === 'error' && (
-                <ErrorOutlineIcon sx={{ fontSize: 18, color: c.status.error }} />
-              )}
-              {(updateStatus === 'idle' || updateStatus === 'not-available' || updateStatus === 'error') && (
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={handleCheckForUpdates}
-                  startIcon={<SystemUpdateAltIcon sx={{ fontSize: 15 }} />}
-                  sx={{
-                    color: c.text.secondary,
-                    borderColor: c.border.medium,
-                    textTransform: 'none',
-                    fontSize: '0.8rem',
-                    whiteSpace: 'nowrap',
-                    '&:hover': { color: c.accent.primary, borderColor: c.accent.primary },
-                  }}
-                >
-                  Check for Updates
-                </Button>
-              )}
-              {updateStatus === 'available' && (
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={handleDownloadUpdate}
-                  startIcon={<DownloadIcon sx={{ fontSize: 15 }} />}
-                  sx={{
-                    color: c.accent.primary,
-                    borderColor: c.accent.primary,
-                    textTransform: 'none',
-                    fontSize: '0.8rem',
-                    whiteSpace: 'nowrap',
-                    '&:hover': { bgcolor: `${c.accent.primary}10` },
-                  }}
-                >
-                  Download
-                </Button>
-              )}
-              {updateStatus === 'downloaded' && (
-                <Button
-                  variant="contained"
-                  size="small"
-                  onClick={handleInstallUpdate}
-                  disabled={installing}
-                  startIcon={installing
-                    ? <CircularProgress size={14} sx={{ color: '#fff' }} />
-                    : <RestartAltIcon sx={{ fontSize: 15 }} />}
-                  sx={{
-                    bgcolor: c.accent.primary,
-                    '&:hover': { bgcolor: c.accent.pressed },
-                    '&.Mui-disabled': { bgcolor: c.accent.primary, color: '#fff', opacity: 0.7 },
-                    textTransform: 'none',
-                    fontSize: '0.8rem',
-                    whiteSpace: 'nowrap',
-                    borderRadius: 1.5,
-                  }}
-                >
-                  {installing ? 'Restarting…' : 'Restart & Update'}
-                </Button>
-              )}
-            </Box>
-          </Box>
-          {updateStatus === 'downloading' && (
-            <LinearProgress
-              variant="determinate"
-              value={downloadPercent}
-              sx={{
-                height: 3,
-                borderRadius: 2,
-                bgcolor: `${c.accent.primary}20`,
-                '& .MuiLinearProgress-bar': { bgcolor: c.accent.primary, borderRadius: 2 },
-              }}
-            />
-          )}
-        </Box>
+        <GeneralInterface form={form} setForm={setForm} styles={styles} />
+        <GeneralAdvanced form={form} setForm={setForm} styles={styles} />
 
         <TrustedFilePatterns />
 
