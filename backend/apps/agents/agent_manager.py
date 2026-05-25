@@ -173,6 +173,83 @@ def _is_transient_capacity_error(exc: BaseException, extra_text: str = "") -> bo
     return False
 
 
+def _custom_provider_env_for_model(global_settings, resolved_model: str, model_value: str) -> dict[str, str] | None:
+    from backend.apps.agents.providers.registry import _find_custom_provider_for_value
+
+    cp = _find_custom_provider_for_value(global_settings, model_value)
+    if not cp:
+        return None
+
+    env = {
+        "ANTHROPIC_API_KEY": "9router",
+        "ANTHROPIC_BASE_URL": "http://localhost:20128",
+        "ENABLE_TOOL_SEARCH": "auto",
+    }
+    # Local OpenAI-compatible servers (LM Studio, Ollama, ...)
+    # often run with auth disabled — the user leaves api_key
+    # blank in Settings. The OpenAI-style SDK insists on a
+    # non-empty key; substitute a harmless placeholder so the
+    # CLI can issue requests. Servers that DO check auth always
+    # have a real key configured.
+    env["OPENAI_API_KEY"] = (getattr(cp, "api_key", "") or "").strip() or "no-auth-required"
+    env["OPENAI_BASE_URL"] = getattr(cp, "base_url", "") or ""
+
+    # Pin subagent ids. If the user also has a native Anthropic
+    # path, we keep the subagents on the Claude lane; otherwise
+    # keep them on the same custom endpoint so the retry doesn't
+    # hop back to an unrelated provider.
+    if getattr(global_settings, "anthropic_api_key", None):
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = "claude-sonnet-4-6"
+        env["ANTHROPIC_SMALL_FAST_MODEL"] = "claude-haiku-4-5-20251001"
+        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "claude-haiku-4-5-20251001"
+    else:
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = resolved_model
+        env["ANTHROPIC_SMALL_FAST_MODEL"] = resolved_model
+        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = resolved_model
+    return env
+
+
+def _pick_custom_provider_fallback_model(global_settings, model_value: str) -> str | None:
+    from backend.apps.agents.providers.registry import (
+        _custom_provider_slug_for_lookup,
+        _find_custom_provider_for_value,
+    )
+
+    current_cp = _find_custom_provider_for_value(global_settings, model_value)
+    current_name = getattr(current_cp, "name", "") if current_cp else ""
+    current_base_url = getattr(current_cp, "base_url", "") if current_cp else ""
+    current_slug = _custom_provider_slug_for_lookup(current_name) if current_name else ""
+
+    candidates: list[tuple[int, str]] = []
+    for cp in getattr(global_settings, "custom_providers", []) or []:
+        name = getattr(cp, "name", "") or ""
+        slug = _custom_provider_slug_for_lookup(name)
+        if not slug or slug == current_slug:
+            continue
+        models = getattr(cp, "models", []) or []
+        if not models:
+            continue
+        first = models[0]
+        if isinstance(first, dict):
+            model_id = (first.get("value") or "").strip()
+        else:
+            model_id = (getattr(first, "value", "") or "").strip()
+        if not model_id:
+            continue
+        base_url = (getattr(cp, "base_url", "") or "").strip()
+        score = 0
+        if base_url and base_url != current_base_url:
+            score += 2
+        if name and name != current_name:
+            score += 1
+        candidates.append((score, f"custom/{slug}/{model_id}"))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return candidates[0][1]
+
+
 def _load_all_session_data() -> list[tuple[str, dict]]:
     results = []
     if not os.path.exists(SESSIONS_DIR):
@@ -2174,81 +2251,6 @@ class AgentManager:
             )
             _api_route_provider = (_model_entry or {}).get("api") if _is_pinned_api_route else None
 
-            def _custom_provider_env_for_model(model_value: str) -> dict[str, str] | None:
-                from backend.apps.agents.providers.registry import _find_custom_provider_for_value
-
-                cp = _find_custom_provider_for_value(global_settings, model_value)
-                if not cp:
-                    return None
-
-                env = {
-                    "ANTHROPIC_API_KEY": "9router",
-                    "ANTHROPIC_BASE_URL": "http://localhost:20128",
-                    "ENABLE_TOOL_SEARCH": "auto",
-                }
-                # Local OpenAI-compatible servers (LM Studio, Ollama, ...)
-                # often run with auth disabled — the user leaves api_key
-                # blank in Settings. The OpenAI-style SDK insists on a
-                # non-empty key; substitute a harmless placeholder so the
-                # CLI can issue requests. Servers that DO check auth always
-                # have a real key configured.
-                env["OPENAI_API_KEY"] = (getattr(cp, "api_key", "") or "").strip() or "no-auth-required"
-                env["OPENAI_BASE_URL"] = getattr(cp, "base_url", "") or ""
-
-                # Pin subagent ids. If the user also has a native Anthropic
-                # path, we keep the subagents on the Claude lane; otherwise
-                # keep them on the same custom endpoint so the retry doesn't
-                # hop back to an unrelated provider.
-                if getattr(global_settings, "anthropic_api_key", None):
-                    env["CLAUDE_CODE_SUBAGENT_MODEL"] = "claude-sonnet-4-6"
-                    env["ANTHROPIC_SMALL_FAST_MODEL"] = "claude-haiku-4-5-20251001"
-                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "claude-haiku-4-5-20251001"
-                else:
-                    env["CLAUDE_CODE_SUBAGENT_MODEL"] = resolved_model
-                    env["ANTHROPIC_SMALL_FAST_MODEL"] = resolved_model
-                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = resolved_model
-                return env
-
-            def _pick_custom_provider_fallback_model(model_value: str) -> str | None:
-                from backend.apps.agents.providers.registry import (
-                    _custom_provider_slug_for_lookup,
-                    _find_custom_provider_for_value,
-                )
-
-                current_cp = _find_custom_provider_for_value(global_settings, model_value)
-                current_name = getattr(current_cp, "name", "") if current_cp else ""
-                current_base_url = getattr(current_cp, "base_url", "") if current_cp else ""
-                current_slug = _custom_provider_slug_for_lookup(current_name) if current_name else ""
-
-                candidates: list[tuple[int, str]] = []
-                for cp in getattr(global_settings, "custom_providers", []) or []:
-                    name = getattr(cp, "name", "") or ""
-                    slug = _custom_provider_slug_for_lookup(name)
-                    if not slug or slug == current_slug:
-                        continue
-                    models = getattr(cp, "models", []) or []
-                    if not models:
-                        continue
-                    first = models[0]
-                    if isinstance(first, dict):
-                        model_id = (first.get("value") or "").strip()
-                    else:
-                        model_id = (getattr(first, "value", "") or "").strip()
-                    if not model_id:
-                        continue
-                    base_url = (getattr(cp, "base_url", "") or "").strip()
-                    score = 0
-                    if base_url and base_url != current_base_url:
-                        score += 2
-                    if name and name != current_name:
-                        score += 1
-                    candidates.append((score, f"custom/{slug}/{model_id}"))
-
-                if not candidates:
-                    return None
-                candidates.sort(key=lambda item: (-item[0], item[1]))
-                return candidates[0][1]
-
             if _is_pinned_api_route and _api_route_provider == "anthropic" and getattr(global_settings, "anthropic_api_key", None):
                 options_kwargs["env"] = {
                     "ANTHROPIC_API_KEY": global_settings.anthropic_api_key,
@@ -2295,7 +2297,7 @@ class AgentManager:
                             "providers need 9Router to translate the Anthropic "
                             "protocol — install Node.js and restart the app."
                         )
-                env = _custom_provider_env_for_model(session.model)
+                env = _custom_provider_env_for_model(global_settings, resolved_model, session.model)
                 if not env:
                     raise ValueError(f"No custom provider config found for {session.model}")
                 options_kwargs["env"] = env
@@ -3545,7 +3547,7 @@ class AgentManager:
                             options = ClaudeAgentOptions(**options_kwargs)
                             continue
 
-                        fallback_model = _pick_custom_provider_fallback_model(session.model)
+                        fallback_model = _pick_custom_provider_fallback_model(global_settings, session.model)
                         if fallback_model and fallback_model != session.model:
                             previous_model = session.model
                             previous_provider = session.provider
@@ -3556,7 +3558,7 @@ class AgentManager:
                             options_kwargs["model"] = resolved_model
                             options_kwargs.pop("resume", None)
                             session.sdk_session_id = None
-                            fallback_env = _custom_provider_env_for_model(fallback_model)
+                            fallback_env = _custom_provider_env_for_model(global_settings, resolved_model, fallback_model)
                             if not fallback_env:
                                 raise ValueError(f"No fallback provider config found for {fallback_model}")
                             options_kwargs["env"] = fallback_env
