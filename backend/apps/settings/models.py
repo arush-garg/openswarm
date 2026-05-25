@@ -64,6 +64,12 @@ class AppSettings(BaseModel):
     auto_reveal_sub_agents: bool = True
     dev_mode: bool = False
     allow_experimental_updates: bool = False
+    # Optional OpenClaw-backed dreaming/reflection integration.
+    dreaming_enabled: bool = False
+    dreaming_frequency_minutes: int = Field(default=1440, ge=5, le=10080)
+    openclaw_path: Optional[str] = None
+    openclaw_auto_detect: bool = True
+    dreaming_status_message: Optional[str] = None
     # Subscription tokens (from CLI tools, alternative to API keys)
     claude_subscription_token: Optional[str] = None
     openai_subscription_token: Optional[str] = None

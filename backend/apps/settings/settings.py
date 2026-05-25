@@ -13,6 +13,7 @@ from typing import Literal, Optional
 
 from backend.config.Apps import SubApp
 from backend.apps.settings.models import AppSettings, DEFAULT_SYSTEM_PROMPT
+from backend.apps.dreaming.openclaw_bridge import ensure_openclaw_path
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,33 @@ def load_settings() -> AppSettings:
     return AppSettings()
 
 
+def _normalize_dreaming_settings(settings_obj: AppSettings) -> None:
+    """Ensure OpenClaw-backed dreaming settings stay coherent.
+
+    This keeps the UX graceful: if OpenClaw is missing, we keep the
+    user's intent (dreaming_enabled) but publish a clear status message
+    instead of throwing validation errors.
+    """
+    resolved_path, status = ensure_openclaw_path(
+        getattr(settings_obj, "openclaw_path", None),
+        auto_detect=bool(getattr(settings_obj, "openclaw_auto_detect", True)),
+    )
+    settings_obj.openclaw_path = resolved_path
+
+    if getattr(settings_obj, "dreaming_enabled", False) and not resolved_path:
+        settings_obj.dreaming_status_message = (
+            status
+            + " Dreaming is enabled but currently unavailable; OpenSwarm will retry when OpenClaw becomes available."
+        )
+    elif getattr(settings_obj, "dreaming_enabled", False):
+        settings_obj.dreaming_status_message = (
+            f"Dreaming enabled. OpenClaw available at {resolved_path}. "
+            f"Runs every {settings_obj.dreaming_frequency_minutes} minute(s)."
+        )
+    else:
+        settings_obj.dreaming_status_message = status
+
+
 # Single threading.Lock guards every write to SETTINGS_FILE — protects against
 # corruption from two requests racing through the file system. Async callers
 # offload the actual write to the default thread pool (run_in_executor), so
@@ -184,6 +212,7 @@ async def update_settings(body: AppSettings):
     from backend.apps.service.client import sync as _sync
 
     old = load_settings()
+    _normalize_dreaming_settings(body)
 
     # Sync the settings state (secrets stripped).
     secret_keys = {"anthropic_api_key", "openai_api_key", "google_api_key", "openrouter_api_key",
@@ -310,6 +339,37 @@ async def update_settings(body: AppSettings):
             logger.warning(f"OpenSwarm-Pro → Claude sync failed: {e}")
 
     return {"ok": True, "settings": body.model_dump()}
+
+
+@settings.router.post("/openclaw-detect")
+async def detect_openclaw_path():
+    current = load_settings()
+    resolved_path, status = ensure_openclaw_path(
+        getattr(current, "openclaw_path", None),
+        auto_detect=True,
+    )
+    current.openclaw_path = resolved_path
+
+    if getattr(current, "dreaming_enabled", False) and resolved_path:
+        current.dreaming_status_message = (
+            f"Dreaming enabled. OpenClaw available at {resolved_path}. "
+            f"Runs every {current.dreaming_frequency_minutes} minute(s)."
+        )
+    elif getattr(current, "dreaming_enabled", False):
+        current.dreaming_status_message = (
+            status
+            + " Dreaming is enabled but currently unavailable; OpenSwarm will retry when OpenClaw becomes available."
+        )
+    else:
+        current.dreaming_status_message = status
+
+    await save_settings_async(current)
+    return {
+        "ok": bool(resolved_path),
+        "path": resolved_path,
+        "message": current.dreaming_status_message,
+        "settings": current.model_dump(),
+    }
 
 
 class AppThemeOverridePayload(BaseModel):

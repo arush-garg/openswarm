@@ -15,6 +15,10 @@ from backend.apps.agents.models import (
 from backend.apps.agents.ws_manager import ws_manager
 from backend.apps.modes.modes import load_mode
 from backend.apps.settings.settings import load_settings
+from backend.apps.dreaming.openclaw_bridge import (
+    ensure_openclaw_path,
+    export_session_to_openclaw_corpus,
+)
 from backend.apps.tools_lib.tools_lib import (
     _load_all as load_all_tools,
     _sanitize_server_name,
@@ -391,6 +395,39 @@ class AgentManager:
             tools = mode_def.tools if mode_def.tools is not None else get_all_tool_names()
             return tools, mode_def.system_prompt, mode_def.default_folder
         return get_all_tool_names(), None, None
+
+    async def _maybe_export_session_to_dreaming_corpus(self, session_id: str, session_doc: dict) -> None:
+        """Best-effort post-session export to OpenClaw corpus with redaction.
+
+        This is intentionally non-blocking and failure-tolerant so normal
+        agent completion is never impacted by external OpenClaw availability.
+        """
+        try:
+            settings = load_settings()
+            if not getattr(settings, "dreaming_enabled", False):
+                return
+
+            openclaw_path, status = ensure_openclaw_path(
+                getattr(settings, "openclaw_path", None),
+                auto_detect=bool(getattr(settings, "openclaw_auto_detect", True)),
+            )
+            if not openclaw_path:
+                logger.info("Dreaming export skipped for %s: %s", session_id, status)
+                return
+
+            loop = asyncio.get_running_loop()
+            ok, message = await loop.run_in_executor(
+                None,
+                export_session_to_openclaw_corpus,
+                session_id,
+                session_doc,
+            )
+            if ok:
+                logger.info("%s", message)
+            else:
+                logger.info("Dreaming export skipped for %s: %s", session_id, message)
+        except Exception:
+            logger.exception("Dreaming export failed for %s", session_id)
 
     def _rehydrate_workers(self) -> None:
         """Load persisted sessions on disk and rehydrate any worker sessions.
@@ -4165,6 +4202,11 @@ class AgentManager:
                     _save_session(session_id, session.model_dump(mode="json"))
                 except Exception as e:
                     logger.warning(f"Failed to snapshot session {session_id}: {e}")
+                try:
+                    snapshot = session.model_dump(mode="json")
+                    asyncio.create_task(self._maybe_export_session_to_dreaming_corpus(session_id, snapshot))
+                except Exception:
+                    logger.exception("Failed queueing dreaming export for %s", session_id)
                 if task_id and getattr(session, "is_worker", False):
                     try:
                         await self.schedule_next_worker_task(session_id)

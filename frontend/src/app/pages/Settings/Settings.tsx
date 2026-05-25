@@ -41,7 +41,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import Collapse from '@mui/material/Collapse';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import { useAppDispatch, useAppSelector } from '@/shared/hooks';
-import { updateSettings, closeSettingsModal, resetSystemPrompt, disconnectSubscription, signOut, activateSignin, fetchSettings, setDraft, clearDraft, AppSettings, CustomProvider, DEFAULT_SYSTEM_PROMPT } from '@/shared/state/settingsSlice';
+import { updateSettings, closeSettingsModal, resetSystemPrompt, disconnectSubscription, signOut, activateSignin, fetchSettings, setDraft, clearDraft, detectOpenclawPath, AppSettings, CustomProvider, DEFAULT_SYSTEM_PROMPT } from '@/shared/state/settingsSlice';
 import { onboardingBus } from '@/app/components/Onboarding/eventBus';
 import { resetTour } from '@/app/components/Onboarding/OnboardingProgressSlice';
 import { OPENSWARM_DEFAULT_PROXY_URL } from '@/shared/config';
@@ -1434,6 +1434,7 @@ const Settings: React.FC = () => {
   const [recordingShortcut, setRecordingShortcut] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [showApiHelp, setShowApiHelp] = useState(false);
+  const [detectingOpenclaw, setDetectingOpenclaw] = useState(false);
 
   useEffect(() => {
     dispatch(fetchModes());
@@ -1513,6 +1514,18 @@ const Settings: React.FC = () => {
   };
 
   const hasChanges = JSON.stringify(form) !== JSON.stringify(settings);
+
+  const handleDetectOpenclaw = async () => {
+    setDetectingOpenclaw(true);
+    try {
+      const detected = await dispatch(detectOpenclawPath()).unwrap();
+      setForm(detected);
+    } catch (e) {
+      console.error('OpenClaw detection failed', e);
+    } finally {
+      setDetectingOpenclaw(false);
+    }
+  };
 
   const handleSave = async () => {
     await dispatch(updateSettings(form));
@@ -2086,6 +2099,97 @@ const Settings: React.FC = () => {
               }}
             />
           </Box>
+        </Box>
+
+        {/* ── Dreaming ── */}
+        <Typography sx={{ ...sectionSx, mt: 3 }}>Dreaming</Typography>
+
+        <Box sx={inlineRowSx}>
+          <Box sx={{ mr: 3 }}>
+            <Typography sx={labelSx}>Enable OpenClaw dreaming</Typography>
+            <Typography sx={descSx}>Exports completed sessions to OpenClaw corpus and runs scheduled reflection cycles.</Typography>
+          </Box>
+          <Switch
+            checked={Boolean(form.dreaming_enabled)}
+            onChange={(e) => setForm({ ...form, dreaming_enabled: e.target.checked })}
+            sx={{
+              '& .MuiSwitch-switchBase.Mui-checked': { color: c.accent.primary },
+              '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: c.accent.primary },
+            }}
+          />
+        </Box>
+
+        <Box sx={inlineRowSx}>
+          <Box sx={{ mr: 3 }}>
+            <Typography sx={labelSx}>Auto-detect OpenClaw path</Typography>
+            <Typography sx={descSx}>Checks common install paths and your PATH via which openclaw.</Typography>
+          </Box>
+          <Switch
+            checked={Boolean(form.openclaw_auto_detect)}
+            onChange={(e) => setForm({ ...form, openclaw_auto_detect: e.target.checked })}
+            sx={{
+              '& .MuiSwitch-switchBase.Mui-checked': { color: c.accent.primary },
+              '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: c.accent.primary },
+            }}
+          />
+        </Box>
+
+        <Box sx={rowSx}>
+          <Typography sx={labelSx}>OpenClaw path</Typography>
+          <Typography sx={{ ...descSx, mb: 1.5 }}>Absolute path to OpenClaw executable or openclaw.mjs file.</Typography>
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+            <TextField
+              value={form.openclaw_path ?? ''}
+              onChange={(e) => setForm({ ...form, openclaw_path: e.target.value || null })}
+              size="small"
+              fullWidth
+              placeholder="Auto-detected when available"
+              sx={{
+                ...fieldSx,
+                '& .MuiOutlinedInput-root': {
+                  ...fieldSx['& .MuiOutlinedInput-root'],
+                  fontFamily: c.font.mono,
+                },
+              }}
+            />
+            <Button
+              variant="outlined"
+              onClick={handleDetectOpenclaw}
+              disabled={detectingOpenclaw}
+              sx={{
+                color: c.text.tertiary,
+                borderColor: c.border.medium,
+                textTransform: 'none',
+                whiteSpace: 'nowrap',
+                minWidth: 'auto',
+                fontSize: '0.8rem',
+                '&:hover': { color: c.accent.primary, borderColor: c.accent.primary },
+              }}
+            >
+              {detectingOpenclaw ? 'Detecting...' : 'Detect'}
+            </Button>
+          </Box>
+          {!!form.dreaming_status_message && (
+            <Typography sx={{ ...descSx, mt: 1 }}>{form.dreaming_status_message}</Typography>
+          )}
+        </Box>
+
+        <Box sx={inlineRowLastSx}>
+          <Box sx={{ mr: 3 }}>
+            <Typography sx={labelSx}>Dreaming frequency (minutes)</Typography>
+            <Typography sx={descSx}>How often OpenSwarm triggers OpenClaw dreaming cycles while enabled.</Typography>
+          </Box>
+          <TextField
+            type="number"
+            value={form.dreaming_frequency_minutes ?? 1440}
+            onChange={(e) => {
+              const next = parseInt(e.target.value || '1440', 10);
+              setForm({ ...form, dreaming_frequency_minutes: Number.isFinite(next) ? next : 1440 });
+            }}
+            size="small"
+            inputProps={{ min: 5, max: 10080 }}
+            sx={{ ...fieldSx, width: 120 }}
+          />
         </Box>
 
         {/* ── Advanced ── */}

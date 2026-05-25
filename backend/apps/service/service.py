@@ -27,6 +27,8 @@ from fastapi import Body
 from backend.config.Apps import SubApp
 from backend.config.paths import SESSIONS_DIR
 from backend.apps.service import client as svc
+from backend.apps.settings.settings import load_settings, save_settings_async
+from backend.apps.dreaming.openclaw_bridge import ensure_openclaw_path, run_openclaw_dreaming_cycle
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ APP_VERSION = _read_app_version()
 
 _pulse_task: asyncio.Task | None = None
 _drain_task: asyncio.Task | None = None
+_dream_task: asyncio.Task | None = None
 
 _last_9r_cost: float | None = None
 _last_9r_prompt_tokens: int | None = None
@@ -81,6 +84,8 @@ _pulse_count = 0
 _pulse_hours: set = set()
 _pulse_delta_cost_total = 0.0
 _pulse_batch_size = 10
+_last_dream_run_ts: float = 0.0
+_last_dream_status: str | None = None
 
 
 async def _pulse_loop():
@@ -145,12 +150,80 @@ async def _drain_loop():
         await asyncio.sleep(60)
 
 
+async def _set_dreaming_status_if_changed(message: str) -> None:
+    global _last_dream_status
+    if not message or message == _last_dream_status:
+        return
+
+    _last_dream_status = message
+    try:
+        settings = load_settings()
+        if getattr(settings, "dreaming_status_message", None) == message:
+            return
+        settings.dreaming_status_message = message
+        await save_settings_async(settings)
+    except Exception:
+        logger.debug("Failed updating dreaming status message", exc_info=True)
+
+
+async def _dreaming_loop():
+    global _last_dream_run_ts
+
+    while True:
+        await asyncio.sleep(30)
+        try:
+            settings = load_settings()
+            if not getattr(settings, "dreaming_enabled", False):
+                continue
+
+            frequency_minutes = max(5, int(getattr(settings, "dreaming_frequency_minutes", 1440) or 1440))
+            interval_seconds = frequency_minutes * 60
+
+            now = asyncio.get_running_loop().time()
+            if _last_dream_run_ts and now - _last_dream_run_ts < interval_seconds:
+                continue
+
+            openclaw_path, status = ensure_openclaw_path(
+                getattr(settings, "openclaw_path", None),
+                auto_detect=bool(getattr(settings, "openclaw_auto_detect", True)),
+            )
+            if not openclaw_path:
+                await _set_dreaming_status_if_changed(
+                    status
+                    + " Dreaming is enabled but currently unavailable; OpenSwarm will keep retrying."
+                )
+                _last_dream_run_ts = now
+                continue
+
+            await _set_dreaming_status_if_changed(
+                f"Dreaming enabled. OpenClaw available at {openclaw_path}. "
+                f"Runs every {frequency_minutes} minute(s)."
+            )
+
+            loop = asyncio.get_running_loop()
+            ok, message = await loop.run_in_executor(None, run_openclaw_dreaming_cycle, openclaw_path)
+            if ok:
+                logger.info("OpenClaw dreaming cycle completed: %s", message)
+                await _set_dreaming_status_if_changed(
+                    f"Last dreaming cycle succeeded at {datetime.now().isoformat(timespec='seconds')}."
+                )
+            else:
+                logger.warning("OpenClaw dreaming cycle skipped/failed: %s", message)
+                await _set_dreaming_status_if_changed(
+                    f"Dreaming cycle could not run: {message}"
+                )
+
+            _last_dream_run_ts = now
+        except Exception:
+            logger.exception("Dreaming scheduler loop error")
+
+
 @asynccontextmanager
 async def service_lifespan():
-    global _pulse_task, _drain_task
+    global _pulse_task, _drain_task, _dream_task
 
     try:
-        from backend.apps.settings.settings import load_settings, _save_settings
+        from backend.apps.settings.settings import _save_settings
         settings = load_settings()
 
         is_first_open = settings.first_opened_at is None
@@ -225,6 +298,7 @@ async def service_lifespan():
 
     _pulse_task = asyncio.create_task(_pulse_loop())
     _drain_task = asyncio.create_task(_drain_loop())
+    _dream_task = asyncio.create_task(_dreaming_loop())
 
     yield
 
@@ -243,6 +317,14 @@ async def service_lifespan():
         except asyncio.CancelledError:
             pass
         _drain_task = None
+
+    if _dream_task:
+        _dream_task.cancel()
+        try:
+            await _dream_task
+        except asyncio.CancelledError:
+            pass
+        _dream_task = None
 
     try:
         from backend.apps.nine_router import stop as stop_9router
