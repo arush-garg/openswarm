@@ -98,6 +98,7 @@ export interface AgentSession {
   dashboard_id?: string;
   browser_id?: string | null;
   parent_session_id?: string | null;
+  is_persistent?: boolean;
   thinking_level?: 'off' | 'low' | 'medium' | 'high' | 'auto';
   active_mcps?: string[];
   ctx_used_pct?: number;
@@ -119,6 +120,19 @@ export interface AgentSession {
   // it via turn_id. ThinkingBubble swaps in this label as soon as it
   // arrives, then back to the heuristic when the turn ends.
   turn_label?: { label: string; turn_id: string } | null;
+  // worker fields removed — durable-worker feature deprecated
+}
+
+export interface TaskEnvelope {
+  id: string;
+  sender: string;
+  recipient: string;
+  mode: 'sync' | 'async' | string;
+  payload: Record<string, any>;
+  status: 'queued' | 'processing' | 'completed' | 'error' | string;
+  result: Record<string, any> | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AgentConfig {
@@ -202,6 +216,7 @@ export const launchAgent = createAsyncThunk('agents/launchAgent', async (config:
   const data = await res.json();
   return data.session as AgentSession;
 });
+// Durable-worker thunks removed; replaced by agent-to-agent tools.
 
 export interface SendMessagePayload {
   sessionId: string;
@@ -1101,6 +1116,7 @@ const agentsSlice = createSlice({
           state.trackedNotificationIds.push(action.payload.id);
         }
       })
+      
       .addCase(launchAndSendFirstMessage.fulfilled, (state, action) => {
         const { draftId, session } = action.payload;
         const shouldExpand = action.meta.arg.expand !== false;

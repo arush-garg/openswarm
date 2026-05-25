@@ -847,6 +847,8 @@ const DashboardInner: React.FC<DashboardProps> = ({ dashboardId, isActive = true
   }, [dispatch]);
 
   useEffect(() => {
+    // Guard against undefined shortcut configuration which can happen before settings are loaded.
+    if (!newAgentShortcut) return;
     const parts = newAgentShortcut.toLowerCase().split('+');
     const key = parts[parts.length - 1];
     const needsMeta = parts.includes('meta');
