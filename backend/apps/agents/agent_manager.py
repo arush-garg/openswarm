@@ -533,7 +533,7 @@ class AgentManager:
         session_id = uuid4().hex
 
         mode_tools, _, mode_folder = self._resolve_mode(config.mode)
-        tools = mode_tools
+        tools = list(config.allowed_tools) if getattr(config, "is_persistent", False) and config.allowed_tools else mode_tools
 
         global_settings = load_settings()
         effective_cwd = (
@@ -617,6 +617,8 @@ class AgentManager:
             repo_url=repo_url,
             branch=branch_name,
             dashboard_id=config.dashboard_id,
+            parent_session_id=getattr(config, "parent_session_id", None),
+            is_persistent=getattr(config, "is_persistent", False),
             thinking_level=getattr(global_settings, "default_thinking_level", "auto"),
         )
         _apply_context_window(session, global_settings)
@@ -1657,6 +1659,23 @@ class AgentManager:
                     "type": "stdio",
                 }
 
+            create_agent_server_path = os.path.join(
+                os.path.dirname(__file__), "create_agent_mcp_server.py"
+            )
+            backend_port = os.environ.get("OPENSWARM_PORT", "8324")
+            from backend.auth import get_auth_token as _get_auth_token_create
+            mcp_servers["openswarm-create-agent"] = {
+                "command": sys.executable,
+                "args": [create_agent_server_path],
+                "env": {
+                    "OPENSWARM_PORT": backend_port,
+                    "OPENSWARM_AUTH_TOKEN": _get_auth_token_create(),
+                    "OPENSWARM_PARENT_SESSION_ID": session.id,
+                    "OPENSWARM_DASHBOARD_ID": session.dashboard_id or "",
+                },
+                "type": "stdio",
+            }
+
             # Always-on meta-MCP server. Exposes MCPList / MCPSearch /
             # MCPActivate so the model can discover and activate user MCPs at
             # runtime. The activation gate (active_mcps filter in
@@ -2297,6 +2316,7 @@ class AgentManager:
             # layer so the model can't even attempt the call.
             options_kwargs["disallowed_tools"] = [
                 "mcp__claude_ai_*",
+                "Agent",
             ]
 
             if session.cwd:
