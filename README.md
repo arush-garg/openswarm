@@ -64,6 +64,8 @@ Running agents in a terminal works fine for one task. But when you're juggling f
 
 **Cost Tracking** — Real-time USD spend tracking per agent session.
 
+**Dreaming & Reflection** — Optional integration with [OpenClaw](https://github.com/ahaaiclub/openclaw) for autonomous memory consolidation and self-reflection. Completed sessions are exported to OpenClaw's dreaming corpus (with sensitive fields redacted), and scheduled dreaming cycles promote high-signal memories into long-term storage. Configured via Settings → Dreaming.
+
 **Dark & Light Themes** — Full theme support with design tokens.
 
 **Keyboard Shortcuts** — Navigate between agents, approve/deny requests, and switch pages without touching a mouse.
@@ -127,7 +129,7 @@ The Anthropic API key is configured in-app via the **Settings** page — no envi
 For advanced configuration, copy `backend/.env.example` to `backend/.env`:
 
 | Variable | Purpose |
-|----------|---------|
+|---------|---------|
 | `BACKEND_PORT` | Backend server port (default: `8324`) |
 | `GOOGLE_OAUTH_CLIENT_ID` | Google Workspace integration (Gmail, Calendar, Drive) |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | Google Workspace integration |
@@ -135,6 +137,7 @@ For advanced configuration, copy `backend/.env.example` to `backend/.env`:
 | `APPLE_APP_SPECIFIC_PASSWORD` | macOS notarization (release builds only) |
 | `APPLE_TEAM_ID` | macOS code signing (release builds only) |
 | `GH_TOKEN` | GitHub Releases publishing (release builds only) |
+| `OPENCLAW_HOME` | Override OpenClaw state root (default: `~/.openclaw`) |
 
 <br>
 
@@ -161,6 +164,7 @@ backend/
     agents/           Agent lifecycle, streaming, worktree management
     dashboards/       Dashboard CRUD and layout persistence
     dashboard_layout/ Card positions and spatial canvas state
+    dreaming/         OpenClaw dreaming bridge (session export, auto-detect, cycle trigger)
     templates/        Prompt template CRUD
     skills/           Skills CRUD (synced to ~/.claude/skills/)
     tools_lib/        MCP tool configuration and discovery

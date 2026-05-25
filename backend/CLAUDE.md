@@ -36,6 +36,17 @@ Full precedences live in root [CLAUDE.md](../.claude/CLAUDE.md). Always: **under
 - Primary model: per-session user choice, resolved by `providers.registry`.
 - Aux model (preflight, classifier, summarizers): pick the **cheap tier of the user's configured provider**. Haiku for Anthropic, GPT-5-mini for OpenAI, Gemini Flash for Google, etc. Never hardcode Haiku.
 
+## Dreaming / OpenClaw integration
+
+- `apps/dreaming/openclaw_bridge.py` — bridge to OpenClaw's memory consolidation pipeline.
+- **Auto-detect**: checks configured path, `which openclaw`, then common install paths. Falls back gracefully with a status message.
+- **Session export**: `export_session_to_openclaw_corpus()` writes redacted session transcripts to `~/.openclaw/workspace/memory/.dreams/session-corpus/YYYY-MM-DD.txt`. Sensitive fields (api keys, tokens, bearer, secrets) are stripped recursively.
+- **Dream cycle**: `run_openclaw_dreaming_cycle()` shells out to `openclaw memory promote --apply` and `openclaw memory rem-harness`.
+- **Scheduler**: `service.py` runs `_dreaming_loop()` — polls settings every 30s, triggers cycle at configurable frequency (default 1440 min, min 5, max 10080). Updates `dreaming_status_message` on success/failure.
+- **Post-session hook**: `agent_manager._maybe_export_session_to_dreaming_corpus()` fires in the finally block after every session turn completes.
+- **Settings**: `dreaming_enabled`, `dreaming_frequency_minutes`, `openclaw_path`, `openclaw_auto_detect`, `dreaming_status_message` — all in `AppSettings`.
+- **Env**: `OPENCLAW_HOME` overrides the OpenClaw state root (default `~/.openclaw`).
+
 ## Dev vs production
 
 What runs under `bash backend/run.sh` is not what ships in the DMG/EXE. Test the packaged build for any change touching the items below.
