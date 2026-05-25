@@ -17,6 +17,7 @@ import {
   handleApproval,
   collapseSession,
   closeSession,
+  
 } from '@/shared/state/agentsSlice';
 import {
   setCardPosition,
@@ -304,6 +305,8 @@ const EXIT_SPRING = { type: 'spring' as const, stiffness: 350, damping: 30, mass
 const GLOW_FADE_MS = 2500;
 
 const SNAP_THRESHOLD = 60;
+
+// Durable-worker UI removed.
 
 const AgentCard: React.FC<Props> = ({
   session, expanded, cardX, cardY, cardWidth, cardHeight, getCanvasState, spawnFrom, exitTarget,
@@ -1048,6 +1051,7 @@ const AgentCard: React.FC<Props> = ({
             overflow: 'hidden',
           }}
         >
+          
           <AgentChat
             key={session.id}
             sessionId={session.id}
@@ -1064,6 +1068,7 @@ const AgentCard: React.FC<Props> = ({
       {/* Collapsed: preview + approval */}
       {!expanded && (
         <>
+          
           {previewContent && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: hasPending ? 1.5 : 0 }}>
               {isStreaming && (

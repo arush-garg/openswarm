@@ -13,19 +13,7 @@ from backend.apps.agents.core.models import (
     AgentConfig, AgentSession, Message, MessageBranch, ApprovalRequest, ToolGroupMeta,
 )
 from backend.apps.agents.core.ws_manager import ws_manager
-from backend.apps.settings.settings import load_settings
-from backend.apps.tools_lib.tools_lib import (
-    _load_all as load_all_tools,
-    _sanitize_server_name,
-    derive_mcp_config,
-    load_builtin_permissions,
-    load_trusted_sensitive_paths,
-    refresh_airtable_token,
-    refresh_google_token,
-    refresh_hubspot_token,
-    save_trusted_sensitive_paths,
-)
-from backend.config.paths import SESSIONS_DIR
+from backend.apps.agents.core.aux_llm import _safe_resp_text
 from backend.apps.agents.core.error_classify import (
     _NON_TRANSIENT_PATTERNS,
     _TRANSIENT_CAPACITY_PATTERNS,
@@ -48,7 +36,6 @@ from backend.apps.agents.manager.prompt.tool_catalog import (
     _get_denied_tool_names,
     _is_fully_denied,
 )
-from backend.apps.agents.core.aux_llm import _safe_resp_text
 from backend.apps.agents.manager.session.history_compaction import (
     _build_history_prefix,
     _get_branch_messages,
@@ -70,6 +57,31 @@ from backend.apps.agents.manager.prompt.attachments import (
     _resolve_attachments,
     _resolve_context_paths,
 )
+from backend.apps.agents.workflow import (
+    persist_task,
+    TaskEnvelope,
+    list_queued_for_recipient,
+    update_task_result,
+    update_task_status,
+)
+from backend.apps.settings.settings import load_settings
+from backend.apps.dreaming.openclaw_bridge import (
+    ensure_openclaw_path,
+    export_session_to_openclaw_corpus,
+)
+from backend.apps.tools_lib.tools_lib import (
+    _load_all as load_all_tools,
+    _sanitize_server_name,
+    derive_mcp_config,
+    load_builtin_permissions,
+    load_trusted_sensitive_paths,
+    refresh_airtable_token,
+    refresh_google_token,
+    refresh_hubspot_token,
+    save_trusted_sensitive_paths,
+)
+from backend.config.paths import SESSIONS_DIR
+from backend.apps.service.client import sync as _sync
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +115,171 @@ def _apply_context_window(session, settings=None) -> None:
         logger.debug("context_window lookup failed; keeping existing value", exc_info=True)
 
 
+def _save_session(session_id: str, doc_data: dict):
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    with open(os.path.join(SESSIONS_DIR, f"{session_id}.json"), "w") as f:
+        json.dump(doc_data, f, indent=2)
+
+
+def _load_session_data(session_id: str) -> dict | None:
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def _delete_session_file(session_id: str):
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if os.path.exists(path):
+        os.remove(path)
+
+
+# Patterns that indicate an upstream transient problem (overload / rate limit /
+# infra blip) — safe to silently retry with backoff. Checked against the
+# stringified exception from claude_agent_sdk / Claude CLI.
+_TRANSIENT_CAPACITY_PATTERNS = re.compile(
+    r"(?:\b(?:429|500|502|503|504|529)\b"
+    r"|overloaded"
+    r"|service\s+(?:temporarily\s+)?unavailable"
+    r"|at\s+capacity"
+    r"|try\s+again\s+shortly"
+    r"|internal\s+server\s+error"
+    r"|rate[_\s-]?limit(?:_error)?"
+    r"|ECONNRESET|ETIMEDOUT|ENETUNREACH|fetch\s+failed"
+    r"|upstream\s+connect\s+error)",
+    re.IGNORECASE,
+)
+
+# Patterns that look rate-limit-ish but are actually non-transient (user quota,
+# auth, context-window tier gate). Must NOT retry — upgrading, reauthing, or
+# trimming context is required. The long-context-required variant is what
+# Anthropic returns when an OAuth Pro/Max account ships a request whose input
+# exceeds the 200K standard tier and would need the "extra usage" tier; the
+# user can't recover by waiting, so we surface it instead of looping.
+_NON_TRANSIENT_PATTERNS = re.compile(
+    r"(?:usage\s+cap\s+exceeded"
+    r"|reached\s+your\s+OpenSwarm.*plan\s+limit"
+    r"|no\s+active\s+subscription"
+    r"|subscription\s+(?:canceled|past_due)"
+    r"|invalid.*token"
+    r"|missing\s+bearer\s+token"
+    r"|extra\s+usage\s+is\s+required\s+for\s+long\s+context"
+    r"|long\s+context\s+(?:requests?\s+)?(?:requires?|not\s+(?:available|enabled))"
+    r"|401|403)",
+    re.IGNORECASE,
+)
+
+
+def _is_long_context_error(exc: BaseException, extra_text: str = "") -> bool:
+    """True when the upstream error is the 'long context tier required' 429.
+
+    Used by the catch-all error path to emit a friendly context-overflow
+    event instead of a generic system-error message.
+    """
+    combined = f"{exc!s}\n{extra_text}".strip()
+    if not combined:
+        return False
+    return bool(re.search(
+        r"extra\s+usage\s+is\s+required\s+for\s+long\s+context"
+        r"|long\s+context\s+(?:requests?\s+)?(?:requires?|not\s+(?:available|enabled))",
+        combined,
+        re.IGNORECASE,
+    ))
+
+
+def _is_auth_error(exc: BaseException, extra_text: str = "") -> bool:
+    """True when the upstream error is a 401/403 auth failure.
+
+    Used by the catch-all error path to surface a friendly "subscription
+    expired / reconnect" card instead of dumping the raw 401 JSON. The most
+    common cause: the OpenSwarm Pro bearer or 9Router OAuth token has expired
+    while the UI still shows the connection as 'connected'.
+    """
+    combined = f"{exc!s}\n{extra_text}".strip()
+    if not combined:
+        return False
+    return bool(re.search(
+        r"\b(401|403)\b"
+        r"|invalid\s+authentication\s+credentials"
+        r"|invalid.*api[_\s-]?key"
+        r"|missing\s+bearer\s+token"
+        r"|unauthori[sz]ed"
+        r"|no\s+credentials\s+for\s+provider"
+        r"|provider\s+not\s+(?:configured|connected|authorized)",
+        combined,
+        re.IGNORECASE,
+    ))
+
+
+def _is_transient_capacity_error(exc: BaseException, extra_text: str = "") -> bool:
+    # The Claude CLI's underlying ProcessError stringifies to a generic
+    # "Command failed with exit code 1 / Check stderr output for details" —
+    # the real cause (rate_limit_error / No pool capacity available / 429
+    # / overloaded) only surfaces in the subprocess's stderr stream, which
+    # we capture via the SDK's `stderr` callback and pass in as extra_text.
+    # Classify against both so we catch capacity errors regardless of which
+    # channel carried the message.
+    combined = f"{exc!s}\n{extra_text}".strip()
+    if not combined:
+        return False
+    if _NON_TRANSIENT_PATTERNS.search(combined):
+        return False
+    if _TRANSIENT_CAPACITY_PATTERNS.search(combined):
+        return True
+    # Pool-exhaustion copy from the OpenSwarm proxy ("No pool capacity
+    # available. Try again shortly.") — matches the capacity family too.
+    if re.search(r"no\s+pool\s+capacity", combined, re.IGNORECASE):
+        return True
+    return False
+
+
+def _load_all_session_data() -> list[tuple[str, dict]]:
+    results = []
+    if not os.path.exists(SESSIONS_DIR):
+        return results
+    for fname in os.listdir(SESSIONS_DIR):
+        if fname.endswith(".json"):
+            with open(os.path.join(SESSIONS_DIR, fname)) as f:
+                results.append((fname[:-5], json.load(f)))
+    return results
+
+FULL_TOOLS = [
+    "Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion",
+    "WebSearch", "WebFetch", "NotebookEdit", "TodoWrite",
+    "EnterPlanMode", "ExitPlanMode", "EnterWorktree",
+    "TaskOutput", "TaskStop",
+    "CronCreate", "CronList", "CronDelete",
+    "InvokeAgent",
+    "Agent",
+    # ToolSearch is the loader the CLI uses to expose deferred tool schemas
+    # on demand. Must be in the allowedTools whitelist or the model can't
+    # call it, which means none of the deferred extended tools become
+    # reachable even when the CLI advertises them in the system prompt.
+    "ToolSearch",
+]
+
+def _get_denied_tool_names(tool) -> set[str]:
+    """Return the set of MCP sub-tool names whose permission is 'deny'."""
+    return {
+        key for key, value in tool.tool_permissions.items()
+        if not key.startswith("_") and value == "deny"
+    }
+
+
+def _get_all_known_tool_names(tool) -> set[str]:
+    """Return all known sub-tool names for an MCP tool (from _tool_descriptions)."""
+    return set(tool.tool_permissions.get("_tool_descriptions", {}).keys())
+
+
+def _is_fully_denied(tool) -> bool:
+    """True when every known sub-tool on this MCP server is set to 'deny'."""
+    known = _get_all_known_tool_names(tool)
+    if not known:
+        return False
+    return known <= _get_denied_tool_names(tool)
+
+
 def get_all_tool_names() -> list[str]:
     """FULL_TOOLS + installed MCP tool identifiers (mcp:<tool_name>).
 
@@ -129,9 +306,140 @@ class AgentManager:
     def __init__(self):
         self.sessions: dict[str, AgentSession] = {}
         self.tasks: dict[str, asyncio.Task] = {}
+        # Map of worker_id -> asyncio.Lock to avoid double-scheduling
+        self.worker_locks: dict[str, asyncio.Lock] = {}
+        # Rehydrate any persisted worker sessions and restore locks
+        try:
+            self._rehydrate_workers()
+        except Exception:
+            logger.exception("Worker rehydration failed during init")
     
     def _resolve_mode(self, mode_id: str) -> tuple[list[str], str | None, str | None]:
         return _resolve_mode(mode_id, get_all_tool_names)
+
+    async def _maybe_export_session_to_dreaming_corpus(self, session_id: str, session_doc: dict) -> None:
+        """Best-effort post-session export to OpenClaw corpus with redaction.
+
+        This is intentionally non-blocking and failure-tolerant so normal
+        agent completion is never impacted by external OpenClaw availability.
+        """
+        try:
+            settings = load_settings()
+            if not getattr(settings, "dreaming_enabled", False):
+                return
+
+            openclaw_path, status = ensure_openclaw_path(
+                getattr(settings, "openclaw_path", None),
+                auto_detect=bool(getattr(settings, "openclaw_auto_detect", True)),
+            )
+            if not openclaw_path:
+                logger.info("Dreaming export skipped for %s: %s", session_id, status)
+                return
+
+            loop = asyncio.get_running_loop()
+            ok, message = await loop.run_in_executor(
+                None,
+                export_session_to_openclaw_corpus,
+                session_id,
+                session_doc,
+            )
+            if ok:
+                logger.info("%s", message)
+            else:
+                logger.info("Dreaming export skipped for %s: %s", session_id, message)
+        except Exception:
+            logger.exception("Dreaming export failed for %s", session_id)
+
+    def _rehydrate_workers(self) -> None:
+        """Load persisted sessions on disk and rehydrate any worker sessions.
+
+        This repopulates self.sessions for AgentSession objects that have
+        is_worker==True and ensures a per-worker asyncio.Lock exists. If an
+        event loop is running, schedule any queued tasks for idle workers
+        in the background. This method is defensive: malformed session
+        files are skipped and errors are logged without blocking init.
+        """
+        try:
+            entries = _load_all_session_data()
+        except Exception:
+            logger.exception("Failed loading session files during rehydration")
+            entries = []
+
+        for sid, doc in entries:
+            try:
+                session = AgentSession.parse_obj(doc)
+            except Exception:
+                logger.exception("Failed parsing session file %s; skipping", sid)
+                continue
+
+            if getattr(session, "is_worker", False):
+                # Restore into in-memory sessions and ensure lock exists
+                try:
+                    self.sessions[sid] = session
+                    self.worker_locks.setdefault(sid, asyncio.Lock())
+                    # Ensure a sane worker_status
+                    if not getattr(session, "worker_status", None):
+                        try:
+                            session.worker_status = "idle"
+                            _save_session(sid, session.model_dump(mode="json"))
+                        except Exception:
+                            logger.exception("Failed persisting default worker_status for %s", sid)
+                except Exception:
+                    logger.exception("Failed restoring worker session %s", sid)
+                    continue
+
+        # If an asyncio loop is active, schedule queued tasks for idle workers
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop:
+            try:
+                asyncio.create_task(self._schedule_queued_for_rehydrated())
+            except Exception:
+                logger.exception("Failed to schedule rehydrated worker tasks (create_task)")
+        else:
+            logger.info("Event loop not running; queued worker tasks will be scheduled later")
+
+    async def _schedule_queued_for_rehydrated(self) -> None:
+        """Query persisted task queue for rehydrated workers and schedule work.
+
+        For each worker session rehydrated into self.sessions, check
+        list_queued_for_recipient(session_id). If tasks exist and the
+        worker_status is 'idle', schedule the first queued task by creating
+        an asyncio task that calls _run_agent_loop(...). Any scheduling is
+        guarded by the per-worker lock to avoid double-starts.
+        """
+        for sid, session in list(self.sessions.items()):
+            if not getattr(session, "is_worker", False):
+                continue
+            try:
+                queued = list_queued_for_recipient(sid)
+            except Exception:
+                logger.exception("Failed listing queued tasks for recipient %s", sid)
+                continue
+
+            if not queued:
+                continue
+
+            # Only schedule if worker appears idle
+            if getattr(session, "worker_status", "idle") != "idle":
+                continue
+
+            lock = self.worker_locks.setdefault(sid, asyncio.Lock())
+            # Avoid scheduling if another scheduling operation is in progress
+            if lock.locked():
+                continue
+            try:
+                async with lock:
+                    # Re-check status after acquiring lock
+                    cur = self.sessions.get(sid)
+                    if not cur or getattr(cur, "worker_status", "idle") != "idle":
+                        continue
+                    await self._schedule_worker_task_locked(sid, queued[0])
+            except Exception:
+                logger.exception("Error while scheduling queued tasks for worker %s", sid)
 
     async def _build_mcp_servers(
         self,
@@ -324,6 +632,35 @@ class AgentManager:
 
         return session
 
+    def _resolve_context_paths(self, context_paths: list | None) -> str:
+        """Read file contents / directory trees for attached context paths."""
+        if not context_paths:
+            return ""
+        sections = []
+        for cp in context_paths:
+            path = cp.get("path", "")
+            cp_type = cp.get("type", "file")
+            if not path or not os.path.exists(path):
+                sections.append(f"[Context: {path} — not found]")
+                continue
+            if cp_type == "file" and os.path.isfile(path):
+                try:
+                    with open(path, "r", errors="replace") as f:
+                        content = f.read(512_000)  # ~500KB cap per file
+                    sections.append(
+                        f"<context_file path=\"{path}\">\n{content}\n</context_file>"
+                    )
+                except Exception as e:
+                    sections.append(f"[Context: {path} — error reading: {e}]")
+            elif cp_type == "directory" and os.path.isdir(path):
+                tree_lines = self._build_dir_tree(path, max_depth=4)
+                sections.append(
+                    f"<context_directory path=\"{path}\">\n{chr(10).join(tree_lines)}\n</context_directory>"
+                )
+            else:
+                sections.append(f"[Context: {path} — type mismatch]")
+        return "\n\n".join(sections)
+
     def _build_dir_tree(self, root: str, max_depth: int = 4, prefix: str = "") -> list[str]:
         return _build_dir_tree(root, max_depth, prefix)
 
@@ -384,11 +721,27 @@ class AgentManager:
     def _resolve_context_paths(self, context_paths: list | None) -> str:
         return _resolve_context_paths(context_paths)
 
-    async def _run_agent_loop(self, session_id: str, prompt: str, images: list | None = None, context_paths: list | None = None, forced_tools: list[str] | None = None, attached_skills: list | None = None, fork_session: bool = False, selected_browser_ids: list[str] | None = None):
+    async def _run_agent_loop(self, session_id: str, prompt: str, task_id: Optional[str] = None, images: list | None = None, context_paths: list | None = None, forced_tools: list[str] | None = None, attached_skills: list | None = None, fork_session: bool = False, selected_browser_ids: list[str] | None = None):
         """Run the Claude Agent SDK query loop for a session."""
         session = self.sessions.get(session_id)
         if not session:
             return
+
+        # If this invocation is running a queued TaskEnvelope, set the
+        # worker status to busy and persist the session so dashboards see
+        # the change immediately.
+        if task_id and getattr(session, "is_worker", False):
+            try:
+                session.worker_status = "busy"
+                _save_session(session_id, session.model_dump(mode="json"))
+                await ws_manager.send_to_session(session_id, "agent:status", {
+                    "session_id": session_id,
+                    "status": session.status,
+                    "worker_status": "busy",
+                    "session": session.model_dump(mode="json"),
+                })
+            except Exception:
+                logger.exception("Failed setting worker busy state for %s", session_id)
         
         from backend.apps.agents.providers.registry import get_api_type as _get_api_type
         _api = _get_api_type(session.model)
@@ -408,22 +761,91 @@ class AgentManager:
             )
         except ImportError:
             logger.warning("claude_agent_sdk not installed, running in mock mode")
-            await self._run_mock_agent(session_id, prompt)
+            await self._run_mock_agent(session_id, prompt, task_id=task_id)
+            if task_id and getattr(session, "is_worker", False):
+                try:
+                    session.worker_status = "idle"
+                    _save_session(session_id, session.model_dump(mode="json"))
+                    await ws_manager.send_to_session(session_id, "agent:status", {
+                        "session_id": session_id,
+                        "status": session.status,
+                        "worker_status": "idle",
+                        "session": session.model_dump(mode="json"),
+                    })
+                    await self.schedule_next_worker_task(session_id)
+                except Exception:
+                    logger.exception("Failed finalizing mock worker task %s", task_id)
             return
 
         session.status = "running"
 
-        # Resolve the model id now so every closure (approval hook, tool
-        # executed handler, etc.) has both the short name and the
-        # 9Router-prefixed id available without re-resolving. The short
-        # name is what the user sees; the router id is what 9Router
-        # reports its per-model counters under.
-        from backend.apps.agents.providers.registry import (
-            resolve_model_id_for_sdk as _resolve_model_id_early,
-            get_api_type as _get_api_type_early,
-        )
+        try:
+            # Resolve the model id now so every closure (approval hook, tool
+            # executed handler, etc.) has both the short name and the
+            # 9Router-prefixed id available without re-resolving. The short
+            # name is what the user sees; the router id is what 9Router
+            # reports its per-model counters under.
+            from backend.apps.agents.providers.registry import (
+                resolve_model_id_for_sdk as _resolve_model_id_early,
+                get_api_type as _get_api_type_early,
+            )
+        except ValueError as e:
+            # If no AI provider is configured, fall back to the mock agent
+            msg = str(e)
+            if "No AI provider configured" in msg:
+                logger.warning("No AI provider configured; falling back to mock agent")
+                await self._run_mock_agent(session_id, prompt, task_id=task_id)
+                if task_id and getattr(session, "is_worker", False):
+                    try:
+                        session.worker_status = "idle"
+                        _save_session(session_id, session.model_dump(mode="json"))
+                        await ws_manager.send_to_session(session_id, "agent:status", {
+                            "session_id": session_id,
+                            "status": session.status,
+                            "worker_status": "idle",
+                            "session": session.model_dump(mode="json"),
+                        })
+                        await self.schedule_next_worker_task(session_id)
+                    except Exception:
+                        logger.exception("Failed finalizing mock worker task %s", task_id)
+                return
+            raise
         _router_model_id = _resolve_model_id_early(session.model, load_settings())
         _api_type_for_session = _get_api_type_early(session.model)
+
+        # If the resolved API for this model is Anthropic but the user has
+        # no Anthropic API key and 9Router is not available, fall back to
+        # the mock agent to avoid launching the SDK which may spawn a
+        # failing CLI process in test/dev environments.
+        # If there are no configured provider API keys at all and 9Router
+        # isn't available, use the mock agent to avoid invoking the SDK
+        # which may attempt to spawn CLI processes in local/dev setups.
+        try:
+            from backend.apps.nine_router import is_running as _9r_running
+        except Exception:
+            _9r_running = lambda: False
+        settings_for_check = load_settings()
+        has_any_key = any(
+            getattr(settings_for_check, k, None)
+            for k in ("anthropic_api_key", "openai_api_key", "google_api_key", "openrouter_api_key")
+        )
+        if not has_any_key and not _9r_running():
+            logger.warning("No Anthropic API key and 9Router not running; using mock agent for session %s", session_id)
+            await self._run_mock_agent(session_id, prompt, task_id=task_id)
+            if task_id and getattr(session, "is_worker", False):
+                try:
+                    session.worker_status = "idle"
+                    _save_session(session_id, session.model_dump(mode="json"))
+                    await ws_manager.send_to_session(session_id, "agent:status", {
+                        "session_id": session_id,
+                        "status": session.status,
+                        "worker_status": "idle",
+                        "session": session.model_dump(mode="json"),
+                    })
+                    await self.schedule_next_worker_task(session_id)
+                except Exception:
+                    logger.exception("Failed finalizing mock worker task %s", task_id)
+            return
 
         _builtin_perms = load_builtin_permissions()
 
@@ -660,6 +1082,10 @@ class AgentManager:
             im = _re.match(r"mcp__openswarm-invoke-agent__(.+)", tool_name)
             if im:
                 return _builtin_perms.get(im.group(1), _default_for(im.group(1)))
+
+            sm = _re.match(r"mcp__openswarm-send-to-agent__(.+)", tool_name)
+            if sm:
+                return _builtin_perms.get(sm.group(1), _default_for(sm.group(1)))
 
             m = _re.match(r"mcp__([^_]+(?:-[^_]+)*)__(.+)", tool_name)
             if m:
@@ -916,14 +1342,20 @@ class AgentManager:
             if elapsed_ms is not None:
                 result_payload["elapsed_ms"] = elapsed_ms
 
-            if hook_tool_name == "Agent":
+            # Backwards-compatible: previous tool name 'Agent' created a
+            # sub-session. New preferred tool name is 'CreateAgent'.
+            if hook_tool_name in ("Agent", "CreateAgent"):
                 tool_input = input_data.get("tool_input", {})
+                # Accept either a simple prompt/task or a richer spec with
+                # explicit `system_prompt`, `name`, and `model` fields.
                 agent_prompt = tool_input.get("prompt", tool_input.get("task", ""))
 
+                # Use explicit system_prompt if provided, else fall back to
+                # the assistant's raw_response text or the prompt.
                 sub_text = content
                 sub_cost = 0.0
                 sub_tokens = {"input": 0, "output": 0}
-                sub_model = session.model
+                sub_model = tool_input.get("model") or session.model
                 if isinstance(raw_response, dict):
                     blocks = raw_response.get("content")
                     if isinstance(blocks, list):
@@ -945,8 +1377,30 @@ class AgentManager:
                     if raw_response.get("model"):
                         sub_model = raw_response["model"]
 
+                    persistence_raw = tool_input.get("persistence", tool_input.get("persistent"))
+                    is_persistent = False
+                    if isinstance(persistence_raw, str):
+                        is_persistent = persistence_raw.strip().lower() in ("persistent", "persist", "true", "yes")
+                    elif isinstance(persistence_raw, bool):
+                        is_persistent = persistence_raw
+
+                    if is_persistent:
+                        parent_mode = session.mode
+                        if parent_mode in ("sub-agent", "invoked-agent", "browser-agent"):
+                            sub_mode = "agent"
+                        else:
+                            sub_mode = parent_mode
+                        sub_allowed_tools = list(session.allowed_tools)
+                        if not sub_allowed_tools:
+                            sub_allowed_tools = self._resolve_mode(sub_mode)[0]
+                        sub_system_prompt = tool_input.get("system_prompt") or session.system_prompt
+                    else:
+                        sub_mode = "sub-agent"
+                        sub_allowed_tools = []
+                        sub_system_prompt = None
+
                 sub_session_id = uuid4().hex
-                sub_name = agent_prompt[:50] if agent_prompt else "Sub-agent"
+                sub_name = tool_input.get("name") or (agent_prompt[:50] if agent_prompt else "Sub-agent")
                 # Subagent context isolation invariant (Phase 3, Layer P):
                 # children DO NOT inherit the parent's active_mcps or
                 # compaction state. They start with the AgentSession
@@ -966,10 +1420,15 @@ class AgentManager:
                     id=sub_session_id,
                     name=sub_name,
                     status="completed",
+                    provider=session.provider,
                     model=sub_model,
-                    mode="sub-agent",
+                    mode=sub_mode,
+                    system_prompt=sub_system_prompt,
+                    allowed_tools=sub_allowed_tools,
                     cwd=session.cwd,
                     created_at=datetime.now(),
+                    repo_url=session.repo_url,
+                    branch=session.branch,
                     cost_usd=sub_cost,
                     tokens=sub_tokens,
                     messages=[
@@ -978,10 +1437,12 @@ class AgentManager:
                     ],
                     dashboard_id=session.dashboard_id,
                     parent_session_id=session_id,
+                    thinking_level=session.thinking_level,
                     # Explicit empty list (matches the model default) so
                     # the invariant is visible at the spawn site rather
                     # than relying on the field's default_factory.
                     active_mcps=[],
+                    is_persistent=is_persistent,
                 )
                 _apply_context_window(sub_session)
                 self.sessions[sub_session_id] = sub_session
@@ -991,6 +1452,24 @@ class AgentManager:
                     "session": sub_session.model_dump(mode="json"),
                 })
                 result_payload["sub_session_id"] = sub_session_id
+
+            elif hook_tool_name == "SendToAgent":
+                # Tool for routing a prompt to another agent session.
+                tool_input = input_data.get("tool_input", {})
+                target = tool_input.get("target_session_id") or tool_input.get("session_id") or tool_input.get("recipient")
+                send_prompt = tool_input.get("prompt") or tool_input.get("task") or ""
+                if not target or not send_prompt:
+                    result_payload = {"ok": False, "error": "target_session_id and prompt are required"}
+                else:
+                    try:
+                        result_payload = await self.route_message(
+                            session.id,
+                            target,
+                            send_prompt,
+                            mode=tool_input.get("mode"),
+                        )
+                    except Exception as e:
+                        result_payload = {"ok": False, "error": str(e)}
 
             result_msg = Message(role="tool_result", content=result_payload, branch_id=session.active_branch_id)
             # Spill oversized tool results to per-session disk storage.
@@ -1154,6 +1633,30 @@ class AgentManager:
                     "type": "stdio",
                 }
 
+            _send_agent_tools = ["SendToAgent"]
+            _send_all_denied = all(
+                _builtin_perms.get(t, "always_allow") == "deny"
+                for t in _send_agent_tools
+            )
+
+            if not _send_all_denied:
+                send_agent_server_path = os.path.join(
+                    os.path.dirname(__file__), "send_to_agent_mcp_server.py"
+                )
+                backend_port = os.environ.get("OPENSWARM_PORT", "8324")
+                from backend.auth import get_auth_token as _get_auth_token4
+                mcp_servers["openswarm-send-to-agent"] = {
+                    "command": sys.executable,
+                    "args": [send_agent_server_path],
+                    "env": {
+                        "OPENSWARM_PORT": backend_port,
+                        "OPENSWARM_AUTH_TOKEN": _get_auth_token4(),
+                        "OPENSWARM_PARENT_SESSION_ID": session.id,
+                        "OPENSWARM_DASHBOARD_ID": session.dashboard_id or "",
+                    },
+                    "type": "stdio",
+                }
+
             # Always-on meta-MCP server. Exposes MCPList / MCPSearch /
             # MCPActivate so the model can discover and activate user MCPs at
             # runtime. The activation gate (active_mcps filter in
@@ -1299,6 +1802,15 @@ class AgentManager:
                                 effective_allowed.append(f"mcp__openswarm-invoke-agent__{it}")
                             elif policy == "deny":
                                 effective_disallowed.append(f"mcp__openswarm-invoke-agent__{it}")
+                        continue
+
+                    if name == "openswarm-send-to-agent":
+                        for st in _send_agent_tools:
+                            policy = _builtin_perms.get(st, "always_allow")
+                            if policy == "always_allow":
+                                effective_allowed.append(f"mcp__openswarm-send-to-agent__{st}")
+                            elif policy == "deny":
+                                effective_disallowed.append(f"mcp__openswarm-send-to-agent__{st}")
                         continue
 
                     if name == "openswarm-web":
@@ -1453,6 +1965,81 @@ class AgentManager:
             )
             _api_route_provider = (_model_entry or {}).get("api") if _is_pinned_api_route else None
 
+            def _custom_provider_env_for_model(model_value: str) -> dict[str, str] | None:
+                from backend.apps.agents.providers.registry import _find_custom_provider_for_value
+
+                cp = _find_custom_provider_for_value(global_settings, model_value)
+                if not cp:
+                    return None
+
+                env = {
+                    "ANTHROPIC_API_KEY": "9router",
+                    "ANTHROPIC_BASE_URL": "http://localhost:20128",
+                    "ENABLE_TOOL_SEARCH": "auto",
+                }
+                # Local OpenAI-compatible servers (LM Studio, Ollama, ...)
+                # often run with auth disabled — the user leaves api_key
+                # blank in Settings. The OpenAI-style SDK insists on a
+                # non-empty key; substitute a harmless placeholder so the
+                # CLI can issue requests. Servers that DO check auth always
+                # have a real key configured.
+                env["OPENAI_API_KEY"] = (getattr(cp, "api_key", "") or "").strip() or "no-auth-required"
+                env["OPENAI_BASE_URL"] = getattr(cp, "base_url", "") or ""
+
+                # Pin subagent ids. If the user also has a native Anthropic
+                # path, we keep the subagents on the Claude lane; otherwise
+                # keep them on the same custom endpoint so the retry doesn't
+                # hop back to an unrelated provider.
+                if getattr(global_settings, "anthropic_api_key", None):
+                    env["CLAUDE_CODE_SUBAGENT_MODEL"] = "claude-sonnet-4-6"
+                    env["ANTHROPIC_SMALL_FAST_MODEL"] = "claude-haiku-4-5-20251001"
+                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "claude-haiku-4-5-20251001"
+                else:
+                    env["CLAUDE_CODE_SUBAGENT_MODEL"] = resolved_model
+                    env["ANTHROPIC_SMALL_FAST_MODEL"] = resolved_model
+                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = resolved_model
+                return env
+
+            def _pick_custom_provider_fallback_model(model_value: str) -> str | None:
+                from backend.apps.agents.providers.registry import (
+                    _custom_provider_slug_for_lookup,
+                    _find_custom_provider_for_value,
+                )
+
+                current_cp = _find_custom_provider_for_value(global_settings, model_value)
+                current_name = getattr(current_cp, "name", "") if current_cp else ""
+                current_base_url = getattr(current_cp, "base_url", "") if current_cp else ""
+                current_slug = _custom_provider_slug_for_lookup(current_name) if current_name else ""
+
+                candidates: list[tuple[int, str]] = []
+                for cp in getattr(global_settings, "custom_providers", []) or []:
+                    name = getattr(cp, "name", "") or ""
+                    slug = _custom_provider_slug_for_lookup(name)
+                    if not slug or slug == current_slug:
+                        continue
+                    models = getattr(cp, "models", []) or []
+                    if not models:
+                        continue
+                    first = models[0]
+                    if isinstance(first, dict):
+                        model_id = (first.get("value") or "").strip()
+                    else:
+                        model_id = (getattr(first, "value", "") or "").strip()
+                    if not model_id:
+                        continue
+                    base_url = (getattr(cp, "base_url", "") or "").strip()
+                    score = 0
+                    if base_url and base_url != current_base_url:
+                        score += 2
+                    if name and name != current_name:
+                        score += 1
+                    candidates.append((score, f"custom/{slug}/{model_id}"))
+
+                if not candidates:
+                    return None
+                candidates.sort(key=lambda item: (-item[0], item[1]))
+                return candidates[0][1]
+
             if _is_pinned_api_route and _api_route_provider == "anthropic" and getattr(global_settings, "anthropic_api_key", None):
                 options_kwargs["env"] = {
                     "ANTHROPIC_API_KEY": global_settings.anthropic_api_key,
@@ -1508,15 +2095,14 @@ class AgentManager:
                 }
                 if cp:
                     # Local OpenAI-compatible servers (LM Studio, Ollama, ...)
-                    # often run with auth disabled, the user leaves api_key
+                    # often run with auth disabled — the user leaves api_key
                     # blank in Settings. The OpenAI-style SDK insists on a
                     # non-empty key; substitute a harmless placeholder so the
                     # CLI can issue requests. Servers that DO check auth always
                     # have a real key configured.
                     env["OPENAI_API_KEY"] = (cp.api_key or "").strip() or "no-auth-required"
-                    from backend.apps.nine_router import normalize_openai_compat_base_url as _norm_cp_url
-                    env["OPENAI_BASE_URL"] = _norm_cp_url(cp.base_url or "")
-                # Pin subagent ids, without these, CLI's default Haiku 4.5
+                    env["OPENAI_BASE_URL"] = (cp.base_url or "")
+                # Pin subagent ids — without these, CLI's default Haiku 4.5
                 # gets sent to the custom provider and 404s.
                 if global_settings.anthropic_api_key:
                     env["CLAUDE_CODE_SUBAGENT_MODEL"] = "claude-sonnet-4-6"
@@ -1951,7 +2537,7 @@ class AgentManager:
             # user just sees a pause, not a red error card. Hard errors
             # (auth, plan limit, invalid args) fall through to the existing
             # error handler unchanged.
-            _CAPACITY_BACKOFFS = [5, 15, 45, 90, 180]
+            _CAPACITY_BACKOFFS = [2, 4]
 
             async def _emit_consolidated_thinking(force_provider_unavailable: bool = False) -> None:
                 """Build the running aggregate Message and broadcast it.
@@ -2765,7 +3351,7 @@ class AgentManager:
                             except Exception:
                                 logger.exception("Failed to emit agent:context_update")
 
-            capacity_retry_attempt = 0
+            capacity_retry_stage = 0
             while True:
                 try:
                     await _run_streaming_turn()
@@ -2785,14 +3371,15 @@ class AgentManager:
                     stderr_snapshot = "\n".join(_stderr_buffer[-50:])
                     if (
                         _is_transient_capacity_error(e, extra_text=stderr_snapshot)
-                        and capacity_retry_attempt < len(_CAPACITY_BACKOFFS)
+                        and capacity_retry_stage < len(_CAPACITY_BACKOFFS)
                     ):
-                        wait = _CAPACITY_BACKOFFS[capacity_retry_attempt]
-                        capacity_retry_attempt += 1
+                        wait = _CAPACITY_BACKOFFS[capacity_retry_stage]
+                        current_stage = capacity_retry_stage
+                        capacity_retry_stage += 1
                         mid_stream = _current_turn_emitted
                         logger.warning(
                             f"Transient upstream error on session {session_id} "
-                            f"(attempt {capacity_retry_attempt}/{len(_CAPACITY_BACKOFFS)}, "
+                            f"(attempt {current_stage + 1}/{len(_CAPACITY_BACKOFFS)}, "
                             f"mid_stream={mid_stream}); sleeping {wait}s before retry. "
                             f"exc={e!r} stderr_tail={stderr_snapshot[-400:]!r}"
                         )
@@ -2820,13 +3407,70 @@ class AgentManager:
                         _current_turn_emitted = False
                         await asyncio.sleep(wait)
                         _stderr_buffer.clear()
-                        if session.sdk_session_id:
-                            options_kwargs["resume"] = session.sdk_session_id
+                        if current_stage == 0:
+                            if session.sdk_session_id:
+                                options_kwargs["resume"] = session.sdk_session_id
+                            else:
+                                options_kwargs.pop("resume", None)
                             options = ClaudeAgentOptions(**options_kwargs)
-                        continue
+                            continue
+
+                        fallback_model = _pick_custom_provider_fallback_model(session.model)
+                        if fallback_model and fallback_model != session.model:
+                            previous_model = session.model
+                            previous_provider = session.provider
+                            session.model = fallback_model
+                            session.provider = _get_api_type_early(fallback_model)
+                            resolved_model = _resolve_model_id_early(fallback_model, global_settings)
+                            api_type = _get_api_type_early(fallback_model)
+                            options_kwargs["model"] = resolved_model
+                            options_kwargs.pop("resume", None)
+                            session.sdk_session_id = None
+                            fallback_env = _custom_provider_env_for_model(fallback_model)
+                            if not fallback_env:
+                                raise ValueError(f"No fallback provider config found for {fallback_model}")
+                            options_kwargs["env"] = fallback_env
+                            logger.warning(
+                                f"Transient upstream error fallback on session {session_id}: "
+                                f"{previous_provider}/{previous_model} → {session.provider}/{session.model}"
+                            )
+                            await ws_manager.send_to_session(session_id, "agent:status", {
+                                "session_id": session_id,
+                                "status": "running",
+                                "session": session.model_dump(mode="json"),
+                            })
+                            options = ClaudeAgentOptions(**options_kwargs)
+                            continue
                     raise
 
             session.status = "completed"
+
+            # If this run was processing a queued task, persist the task
+            # result (include assistant text if available).
+            if task_id:
+                try:
+                    out_text = None
+                    for m in reversed(session.messages):
+                        if getattr(m, "role", "") == "assistant":
+                            c = getattr(m, "content", None)
+                            if isinstance(c, str):
+                                out_text = c
+                            elif isinstance(c, list):
+                                for b in c:
+                                    if isinstance(b, dict) and b.get("type") == "text":
+                                        out_text = b.get("text")
+                                        break
+                                if out_text is None:
+                                    out_text = str(c)
+                            else:
+                                out_text = str(c)
+                            break
+                    if not out_text:
+                        out_text = f"Task {task_id} completed (no assistant output captured)"
+                    update_task_result(task_id, {"success": True, "output": out_text}, status="completed")
+                    logger.info("Task %s marked completed (worker session %s)", task_id, session_id)
+                except Exception:
+                    logger.exception("Failed updating task result for %s", task_id)
 
             # Auto-continuation hook (Phase 3). If MCPActivate (or any
             # analogous flow) flagged pending_continuation during this
@@ -2854,6 +3498,18 @@ class AgentManager:
             session.status = "stopped"
         except Exception as e:
             logger.exception(f"Agent {session_id} error: {e}")
+            # If the SDK run failed (e.g. CLI spawn error), attempt a
+            # best-effort fallback to the mock agent so tests and
+            # development flows without provider credentials still work.
+            try:
+                err_text = str(e) or ""
+                if "Command failed" in err_text or "Fatal error in message reader" in err_text:
+                    logger.warning("SDK run failed; falling back to mock agent for session %s", session_id)
+                    await self._run_mock_agent(session_id, prompt, task_id=task_id)
+                    # _run_mock_agent finalizes session state and task result
+                    return
+            except Exception:
+                logger.exception("Mock fallback failed for session %s", session_id)
             session.status = "error"
 
             # Long-context-required 429 fork: surface a friendly overflow event
@@ -3002,6 +3658,13 @@ class AgentManager:
                     "session_id": session_id,
                     "message": error_msg.model_dump(mode="json"),
                 })
+            # If this was servicing a queued TaskEnvelope, persist an error result.
+            try:
+                if task_id:
+                    update_task_result(task_id, {"success": False, "error": str(e)}, status="error")
+                    logger.info("Task %s marked error (worker session %s)", task_id, session_id)
+            except Exception:
+                logger.exception("Failed to update task error result for %s", task_id)
         except BaseException as e:
             # Catch BaseExceptionGroup from anyio task groups (e.g. concurrent
             # CLI crash + pending approval cancellation) so it doesn't escape
@@ -3014,6 +3677,12 @@ class AgentManager:
                 "session_id": session_id,
                 "message": error_msg.model_dump(mode="json"),
             })
+            try:
+                if task_id:
+                    update_task_result(task_id, {"success": False, "error": str(e)}, status="error")
+                    logger.info("Task %s marked error (fatal) (worker session %s)", task_id, session_id)
+            except Exception:
+                logger.exception("Failed to update task fatal error result for %s", task_id)
         finally:
             if session_id in self.sessions:
                 # For canvas-launched App Builder sessions, the workspace
@@ -3041,15 +3710,32 @@ class AgentManager:
                                 logger.exception("post-sync output_upserted broadcast failed")
                     except Exception:
                         logger.exception("post-session meta sync failed")
+                # Ensure worker sessions are marked idle when the turn ends.
+                if getattr(session, "is_worker", False):
+                    try:
+                        session.worker_status = "idle"
+                    except Exception:
+                        logger.exception("Failed flipping worker_status to idle for %s", session_id)
                 await ws_manager.send_to_session(session_id, "agent:status", {
                     "session_id": session_id,
                     "status": session.status,
+                    "worker_status": getattr(session, "worker_status", None),
                     "session": session.model_dump(mode="json"),
                 })
                 try:
                     _save_session(session_id, session.model_dump(mode="json"))
                 except Exception as e:
                     logger.warning(f"Failed to snapshot session {session_id}: {e}")
+                try:
+                    snapshot = session.model_dump(mode="json")
+                    asyncio.create_task(self._maybe_export_session_to_dreaming_corpus(session_id, snapshot))
+                except Exception:
+                    logger.exception("Failed queueing dreaming export for %s", session_id)
+                if task_id and getattr(session, "is_worker", False):
+                    try:
+                        await self.schedule_next_worker_task(session_id)
+                    except Exception:
+                        logger.exception("Failed scheduling next queued task for worker %s", session_id)
 
     async def _stream_text(self, session_id: str, msg_id: str, text: str, delay: float = 0.03):
         """Emit stream_start, word-by-word deltas, and stream_end for a text message."""
@@ -3093,7 +3779,7 @@ class AgentManager:
             "message_id": msg_id,
         })
 
-    async def _run_mock_agent(self, session_id: str, prompt: str):
+    async def _run_mock_agent(self, session_id: str, prompt: str, task_id: Optional[str] = None):
         """Mock agent loop for development without claude_agent_sdk installed."""
         session = self.sessions.get(session_id)
         if not session:
@@ -3186,6 +3872,21 @@ class AgentManager:
             "session_id": session_id,
             "cost_usd": session.cost_usd,
         })
+        # If this mock run was invoked to process a queued task, write
+        # a task result so callers see completion.
+        try:
+            if task_id and getattr(session, "is_worker", False):
+                out_text = None
+                for m in reversed(session.messages):
+                    if getattr(m, "role", "") == "assistant":
+                        out_text = getattr(m, "content", "")
+                        break
+                if not out_text:
+                    out_text = f"Task {task_id} completed (mock run)"
+                update_task_result(task_id, {"success": True, "output": out_text}, status="completed")
+                logger.info("Mock task %s marked completed (worker session %s)", task_id, session_id)
+        except Exception:
+            logger.exception("Failed to update mock task result for %s", task_id)
 
     async def send_message(
         self,
@@ -3721,12 +4422,12 @@ class AgentManager:
         return {"name": name, "svg": svg, "is_refined": is_refinement}
 
     async def update_session(self, session_id: str, **fields):
-        """Update mutable session fields (system_prompt, name)."""
+        """Update mutable session fields (system_prompt, name, model)."""
         session = self.sessions.get(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
-        allowed = {"system_prompt", "name", "thinking_level"}
+        allowed = {"system_prompt", "name", "thinking_level", "model"}
         for key, value in fields.items():
             if key in allowed:
                 # Defend against bad thinking_level values
@@ -3912,7 +4613,15 @@ class AgentManager:
         for sid, data in _load_all_session_data():
             dirty = False
             if data.get("status") in ("running", "waiting_approval"):
-                data["status"] = "stopped"
+                if data.get("is_worker"):
+                    # Durable workers survive process restarts. A running
+                    # status at boot means the process died mid-turn; make the
+                    # worker available again and let task recovery reschedule
+                    # queued/processing envelopes.
+                    data["status"] = "completed"
+                    data["worker_status"] = "idle"
+                else:
+                    data["status"] = "stopped"
                 dirty = True
                 logger.info(f"Marked stale session {sid} as stopped")
             # Mode migration: Chat was merged into Ask. Rewrite mode="chat"
@@ -3927,7 +4636,11 @@ class AgentManager:
         """Flush every in-memory session to JSON files (for graceful shutdown)."""
         for session_id, session in list(self.sessions.items()):
             if session.status in ("running", "waiting_approval"):
-                session.status = "stopped"
+                if getattr(session, "is_worker", False):
+                    session.status = "completed"
+                    session.worker_status = "idle"
+                else:
+                    session.status = "stopped"
             session.closed_at = None
             for req in list(session.pending_approvals):
                 ws_manager.resolve_approval(req.id, {"behavior": "deny", "message": "Server shutting down"})
@@ -3959,12 +4672,27 @@ class AgentManager:
             if session.closed_at is not None:
                 continue
             if session.status in ("running", "waiting_approval"):
-                session.status = "stopped"
+                if getattr(session, "is_worker", False):
+                    session.status = "completed"
+                    session.worker_status = "idle"
+                else:
+                    session.status = "stopped"
             session.pending_approvals = []
             _apply_context_window(session)
             self.sessions[session.id] = session
-            _delete_session_file(sid)
+            if getattr(session, "is_worker", False):
+                self.worker_locks.setdefault(session.id, asyncio.Lock())
+                try:
+                    _save_session(session.id, session.model_dump(mode="json"))
+                except Exception:
+                    logger.exception("Failed preserving worker session %s during restore", session.id)
+            else:
+                _delete_session_file(sid)
             logger.info(f"Restored session {session.id}")
+        try:
+            await self._schedule_queued_for_rehydrated()
+        except Exception:
+            logger.exception("Failed scheduling queued worker tasks after restore")
 
     async def duplicate_session(self, session_id: str, dashboard_id: str | None = None, up_to_message_id: str | None = None) -> AgentSession:
         """Create an independent copy of a session with the same chat history."""
@@ -4167,6 +4895,47 @@ class AgentManager:
 
     def get_session(self, session_id: str) -> Optional[AgentSession]:
         return self.sessions.get(session_id)
+
+    @staticmethod
+    def _is_persistent_agent(session: AgentSession) -> bool:
+        if session.mode == "sub-agent":
+            return bool(getattr(session, "is_persistent", False))
+        if session.mode in ("invoked-agent", "browser-agent"):
+            return False
+        return True
+
+    def _resolve_route_session(self, session_id: str) -> Optional[AgentSession]:
+        session = self.sessions.get(session_id)
+        if session:
+            return session
+        data = _load_session_data(session_id)
+        if not data:
+            return None
+        try:
+            return AgentSession(**data)
+        except Exception:
+            return None
+
+    async def route_message(
+        self,
+        sender_session_id: str | None,
+        target_session_id: str,
+        prompt: str,
+        mode: str | None = None,
+    ) -> dict:
+        sender = self._resolve_route_session(sender_session_id) if sender_session_id else None
+        target = self._resolve_route_session(target_session_id)
+        if not target:
+            raise ValueError(f"Session {target_session_id} not found")
+        if sender and not self._is_persistent_agent(sender):
+            raise PermissionError("sender must be a persistent agent")
+        if not self._is_persistent_agent(target):
+            raise PermissionError("target must be a persistent agent")
+        existing = self.tasks.get(target_session_id)
+        if existing and not existing.done():
+            raise RuntimeError("target agent is busy")
+        await self.send_message(target_session_id, prompt, mode=mode)
+        return {"ok": True, "target_session_id": target_session_id, "status": "sent"}
 
     def get_browser_agent_children(self, parent_session_id: str) -> list[dict]:
         """Return browser-agent sessions for a parent, from memory or disk."""

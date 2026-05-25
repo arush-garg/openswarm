@@ -59,6 +59,9 @@ async def launch_agent(config: AgentConfig):
     session = await agent_manager.launch_agent(config)
     return {"session_id": session.id, "session": session.model_dump(mode="json")}
 
+
+
+
 @agents.router.post("/sessions/{session_id}/message")
 async def send_message(session_id: str, body: dict):
     prompt = body.get("prompt", "")
@@ -101,6 +104,26 @@ async def send_message(session_id: str, body: dict):
         client_message_id=body.get("client_message_id"),
     )
     return {"ok": True}
+
+
+@agents.router.post("/route")
+async def route_message(body: dict):
+    target = body.get("target_session_id") or body.get("session_id") or body.get("recipient")
+    prompt = body.get("prompt") or body.get("message") or body.get("task")
+    sender = body.get("sender_session_id") or body.get("parent_session_id")
+    if not target or not prompt:
+        raise HTTPException(status_code=400, detail="target_session_id and prompt are required")
+    if not sender:
+        raise HTTPException(status_code=400, detail="sender_session_id is required")
+    try:
+        result = await agent_manager.route_message(sender, target, prompt, mode=body.get("mode"))
+        return result
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 @agents.router.post("/sessions/{session_id}/stop")
 async def stop_agent(session_id: str):

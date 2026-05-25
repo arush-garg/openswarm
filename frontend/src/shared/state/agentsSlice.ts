@@ -82,6 +82,7 @@ export interface AgentSession {
   dashboard_id?: string;
   browser_id?: string | null;
   parent_session_id?: string | null;
+  is_persistent?: boolean;
   thinking_level?: 'off' | 'low' | 'medium' | 'high' | 'auto';
   active_mcps?: string[];
   ctx_used_pct?: number;
@@ -97,6 +98,19 @@ export interface AgentSession {
   connection_state?: 'live' | 'reconnecting';
   /** Aux-LLM verb-phrase for the current turn; ThinkingBubble swaps in then back when turn ends. */
   turn_label?: { label: string; turn_id: string } | null;
+  // worker fields removed — durable-worker feature deprecated
+}
+
+export interface TaskEnvelope {
+  id: string;
+  sender: string;
+  recipient: string;
+  mode: 'sync' | 'async' | string;
+  payload: Record<string, any>;
+  status: 'queued' | 'processing' | 'completed' | 'error' | string;
+  result: Record<string, any> | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface AgentConfig {
@@ -175,6 +189,7 @@ export const launchAgent = createAsyncThunk('agents/launchAgent', async (config:
   const data = await res.json();
   return data.session as AgentSession;
 });
+// Durable-worker thunks removed; replaced by agent-to-agent tools.
 
 export interface SendMessagePayload {
   sessionId: string;
@@ -372,6 +387,18 @@ export const updateThinkingLevel = createAsyncThunk(
       body: JSON.stringify({ thinking_level: level }),
     });
     return { sessionId, level };
+  }
+);
+
+export const persistSessionModel = createAsyncThunk(
+  'agents/persistSessionModel',
+  async ({ sessionId, model }: { sessionId: string; model: string }) => {
+    await fetch(`${AGENTS_API}/sessions/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    });
+    return { sessionId, model };
   }
 );
 
@@ -1036,6 +1063,7 @@ const agentsSlice = createSlice({
           state.trackedNotificationIds.push(action.payload.id);
         }
       })
+      
       .addCase(launchAndSendFirstMessage.fulfilled, (state, action) => {
         const { draftId, session } = action.payload;
         const shouldExpand = action.meta.arg.expand !== false;

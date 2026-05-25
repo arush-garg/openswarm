@@ -51,6 +51,11 @@ export interface AppSettings {
   openrouter_api_key?: string | null;
   custom_providers?: CustomProvider[];
   browser_homepage: string;
+  dreaming_enabled: boolean;
+  dreaming_frequency_minutes: number;
+  openclaw_path: string | null;
+  openclaw_auto_detect: boolean;
+  dreaming_status_message: string | null;
   auto_select_mode_on_new_agent: boolean;
   expand_new_chats_in_dashboard: boolean;
   auto_reveal_sub_agents: boolean;
@@ -120,6 +125,11 @@ const initialState: SettingsState = {
     new_agent_shortcut: 'Meta+l',
     anthropic_api_key: null,
     browser_homepage: 'https://www.google.com',
+    dreaming_enabled: false,
+    dreaming_frequency_minutes: 1440,
+    openclaw_path: null,
+    openclaw_auto_detect: true,
+    dreaming_status_message: null,
     auto_select_mode_on_new_agent: false,
     expand_new_chats_in_dashboard: false,
     auto_reveal_sub_agents: true,
@@ -170,6 +180,24 @@ export const browseDirectories = createAsyncThunk(
   }
 );
 
+export const detectOpenclawPath = createAsyncThunk(
+  'settings/detectOpenclawPath',
+  async () => {
+    const res = await fetch(`${SETTINGS_API}/openclaw-detect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      throw new Error((await res.text()) || 'OpenClaw detection failed');
+    }
+    const data = await res.json();
+    return data.settings as AppSettings;
+  }
+);
+
+// POST /api/subscription/activate — called after the desktop catches an
+// openswarm://auth?token=... deep link. Validates + persists on the backend,
+// then refreshes settings so the Settings UI flips to "Pro" mode.
 /** POST /api/subscription/activate after catching openswarm://auth deep link; flips UI to Pro. */
 export const activateSubscription = createAsyncThunk(
   'settings/activateSubscription',
@@ -279,6 +307,10 @@ const settingsSlice = createSlice({
         state.data = action.payload;
         state.draft = null;
         state.draftTab = null;
+      })
+      .addCase(detectOpenclawPath.fulfilled, (state, action) => {
+        state.data = action.payload;
+        state.draft = action.payload;
       });
   },
 });

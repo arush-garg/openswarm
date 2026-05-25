@@ -176,7 +176,49 @@ class WebFetchTool(BaseTool):
                 resp = await client.get(url)
                 resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            return [{"type": "text", "text": f"HTTP error {exc.response.status_code} fetching {url}"}]
+            # Try to handle common auth/download short-cuts for Google-hosted
+            # docs which commonly return 401 for non-signed-in requests.
+            status = exc.response.status_code
+            if status == 401 and ("docs.google.com" in url or "drive.google.com" in url):
+                # Attempt a best-effort transformation to an export/download URL
+                try_urls: list[str] = []
+                # Google Docs (document)
+                if "/document/d/" in url:
+                    try_urls.append(re.sub(r"(/edit).*", "/export?format=txt", url))
+                # Google Slides / Presentations (may not support txt export; try export as plain text)
+                if "/presentation/d/" in url or "/presentation/" in url:
+                    try_urls.append(re.sub(r"(/edit).*", "/export?format=txt", url))
+                # Drive file share -> direct download
+                m = re.search(r"/file/d/([^/]+)", url)
+                if m:
+                    file_id = m.group(1)
+                    try_urls.append(f"https://drive.google.com/uc?export=download&id={file_id}")
+
+                for tu in try_urls:
+                    try:
+                        async with httpx.AsyncClient(
+                            timeout=_HTTP_TIMEOUT,
+                            follow_redirects=True,
+                            headers={"User-Agent": _USER_AGENT},
+                        ) as client:
+                            tresp = await client.get(tu)
+                            if tresp.status_code == 200:
+                                resp = tresp
+                                break
+                    except Exception:
+                        continue
+
+                # If we obtained a different successful response, continue processing
+                if 'resp' in locals() and resp is not None and resp.status_code == 200:
+                    pass
+                else:
+                    hint = (
+                        "\n\n(This resource returned HTTP 401 — it likely requires sign-in.)\n"
+                        "If this is a Google Doc/Drive file, make it `Anyone with the link` or provide an export/download link "
+                        "(e.g. replace `/edit` with `/export?format=txt` or use `https://drive.google.com/uc?export=download&id=FILE_ID`)."
+                    )
+                    return [{"type": "text", "text": f"HTTP error {status} fetching {url}{hint}"}]
+            return [{"type": "text", "text": f"HTTP error {status} fetching {url}"}]
         except Exception as exc:
             return [{"type": "text", "text": f"Error fetching {url}: {exc}"}]
 

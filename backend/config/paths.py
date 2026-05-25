@@ -34,3 +34,6 @@ TRUSTED_SENSITIVE_PATHS_PATH = os.path.join(DATA_ROOT, "trusted_sensitive_paths.
 AUTH_TOKEN_FILE = os.path.join(DATA_ROOT, "auth.token")
 
 BACKEND_DIR = _BACKEND_DIR
+
+# Durable workflow/task storage
+TASKS_DIR = os.path.join(DATA_ROOT, "tasks")

@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import Chip from '@mui/material/Chip';
+import Collapse from '@mui/material/Collapse';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import TextField from '@mui/material/TextField';
@@ -31,6 +32,7 @@ import {
   duplicateSession,
   setActiveSession,
   updateSessionModel,
+  persistSessionModel,
   updateSessionMode,
   updateSessionThinkingLevel,
   updateThinkingLevel,
@@ -93,27 +95,36 @@ function streamingLabelFor(seedKey: string | undefined): string {
   return STREAMING_LABELS[Math.abs(h) % STREAMING_LABELS.length];
 }
 
-const ThinkingBubble: React.FC<{ label?: string | null; seedKey?: string }> = ({ label, seedKey }) => {
+const ThinkingBubble: React.FC<{ label?: string | null; seedKey?: string; activity?: ActivityEntry[] }> = ({ label, seedKey, activity = [] }) => {
   const c = useClaudeTokens();
   const shimmerBase = c.text.tertiary;
   const shimmerHighlight = c.text.primary;
   // Aux-LLM label wins; otherwise pick a quirky verb keyed off seedKey
   // so different sessions / turns show different verbs without flicker.
   const display = label ? `${label}…` : `${streamingLabelFor(seedKey)}…`;
+  const [expanded, setExpanded] = useState(false);
   return (
-    <Box sx={{ display: 'flex', justifyContent: 'flex-start', my: 0.75 }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-start', my: 0.75 }}>
       <style>{thinkingShimmerKeyframes}</style>
       <Box
+        onClick={() => setExpanded((prev) => !prev)}
         sx={{
           bgcolor: c.bg.surface,
           border: `1px solid ${c.border.subtle}`,
           borderRadius: '16px 16px 16px 4px',
           px: 2,
-          py: 1.5,
+          py: 1.25,
           boxShadow: c.shadow.sm,
           display: 'flex',
           alignItems: 'center',
           minHeight: 36,
+          cursor: 'pointer',
+          userSelect: 'none',
+          transition: 'all 0.15s ease',
+          '&:hover': {
+            bgcolor: c.bg.secondary,
+            borderColor: c.border.medium,
+          },
         }}
       >
         <Box
@@ -134,6 +145,47 @@ const ThinkingBubble: React.FC<{ label?: string | null; seedKey?: string }> = ({
           {display}
         </Box>
       </Box>
+      <Collapse in={expanded} timeout={180} unmountOnExit>
+        <Box
+          sx={{
+            mt: 0.75,
+            ml: 0.5,
+            pl: 1.5,
+            borderLeft: `2px solid ${c.border.subtle}`,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 0.75,
+            minWidth: 0,
+          }}
+        >
+          <Typography sx={{ fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: c.text.tertiary }}>
+            Current activity
+          </Typography>
+          {activity.length ? activity.map((entry) => (
+            <Box
+              key={entry.id}
+              sx={{
+                border: `1px solid ${c.border.subtle}`,
+                bgcolor: c.bg.surface,
+                borderRadius: 1.25,
+                px: 1.25,
+                py: 1,
+              }}
+            >
+              <Typography sx={{ fontSize: '0.68rem', fontWeight: 700, color: c.text.secondary, textTransform: 'uppercase', letterSpacing: '0.06em', mb: 0.5 }}>
+                {entry.title}
+              </Typography>
+              <Typography sx={{ fontSize: '0.78rem', color: c.text.primary, lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {entry.detail}
+              </Typography>
+            </Box>
+          )) : (
+            <Typography sx={{ fontSize: '0.78rem', color: c.text.tertiary, fontStyle: 'italic' }}>
+              No logs have landed yet. The agent is still warming up.
+            </Typography>
+          )}
+        </Box>
+      </Collapse>
     </Box>
   );
 };
@@ -145,6 +197,12 @@ interface QueuedMessage {
   forcedTools?: string[];
   attachedSkills?: Array<{ id: string; name: string; content: string }>;
   selectedBrowserIds?: string[];
+}
+
+interface ActivityEntry {
+  id: string;
+  title: string;
+  detail: string;
 }
 
 interface AgentChatProps {
@@ -493,7 +551,11 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
 
   const handleModelChange = useCallback((newModel: string) => {
     setModel(newModel);
-    if (id && !isDraft) dispatch(updateSessionModel({ sessionId: id, model: newModel }));
+    if (!id) return;
+    dispatch(updateSessionModel({ sessionId: id, model: newModel }));
+    if (!isDraft) {
+      dispatch(persistSessionModel({ sessionId: id, model: newModel }));
+    }
   }, [id, isDraft, dispatch]);
 
   const handleThinkingLevelChange = useCallback((level: 'off' | 'low' | 'medium' | 'high' | 'auto') => {
@@ -833,6 +895,42 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
 
   const isActive = session.status === 'running' || session.status === 'waiting_approval' || session.status === 'draft';
   const statusStyle = STATUS_STYLES[session.status] || { color: c.text.tertiary, bg: c.bg.secondary };
+  const currentTurnActivity = useMemo(() => {
+    const messages = session.messages || [];
+    if (!messages.length) return [];
+
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].branch_id !== session.active_branch_id) continue;
+      if (messages[i].role === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+
+    const currentSlice = lastUserIdx >= 0 ? messages.slice(lastUserIdx + 1) : messages;
+    return currentSlice
+      .filter((message) => message.branch_id === session.active_branch_id && ['thinking', 'system', 'tool_call', 'tool_result'].includes(message.role))
+      .slice(-6)
+      .map((message) => {
+        let detail = stringifyContent(message.content).trim();
+        if (message.role === 'tool_call' && typeof message.content === 'object' && message.content) {
+          const toolName = typeof message.content.tool === 'string' ? message.content.tool : '';
+          const input = stringifyContent(message.content.input).trim();
+          detail = [toolName, input].filter(Boolean).join(' · ') || '(empty tool call)';
+        }
+        if (!detail) detail = '(empty)';
+        if (detail.length > 240) detail = `${detail.slice(0, 237)}…`;
+        const title = message.role === 'thinking'
+          ? 'Thinking'
+          : message.role === 'tool_call'
+            ? 'Tool call'
+            : message.role === 'tool_result'
+              ? 'Tool result'
+              : 'System log';
+        return { id: message.id, title, detail } satisfies ActivityEntry;
+      });
+  }, [session.messages, session.active_branch_id]);
 
   return (
     <Box sx={{ display: 'flex', height: '100%' }}>
@@ -1318,6 +1416,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
               <ThinkingBubble
                 label={session.turn_label?.label}
                 seedKey={`${session.id}:${session.messages?.length ?? 0}`}
+                activity={currentTurnActivity}
               />
             )}
             {showResumeBubble && session.status === 'stopped' && (

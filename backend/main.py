@@ -19,6 +19,7 @@ from backend.config.Apps import MainApp
 from backend.apps.health.health import health
 from backend.apps.agents.agents import agents
 from backend.apps.agents.core.ws_manager import ws_manager
+from backend.apps.agents.workflow import list_queued_for_recipient, load_task, update_task_result
 from backend.apps.skills.skills import skills
 from backend.apps.tools_lib.tools_lib import tools_lib
 from backend.apps.modes.modes import modes
@@ -227,6 +228,60 @@ async def websocket_session(websocket: WebSocket, session_id: str):
         # Drops the socket from the connection list. Does NOT cancel
         # the agent task, that's intentional. See module docstring.
         ws_manager.disconnect_session(session_id, websocket)
+
+
+@app.get("/api/agents/worker/{worker_session_id}/tasks")
+async def worker_tasks(worker_session_id: str):
+    """Return list of queued/processing tasks for a worker."""
+    try:
+        tasks = list_queued_for_recipient(worker_session_id)
+        return JSONResponse({"ok": True, "tasks": [t.model_dump() for t in tasks]})
+    except Exception as e:
+        logger.exception("worker_tasks failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/agents/task/{task_id}")
+async def get_task(task_id: str):
+    """Return the task envelope contents."""
+    t = load_task(task_id)
+    if not t:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    return JSONResponse({"ok": True, "task": t.model_dump()})
+
+
+@app.post("/api/agents/task/{task_id}/claim")
+async def claim_task(task_id: str):
+    """Mark a queued task as processing (queued -> processing)."""
+    t = load_task(task_id)
+    if not t:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    if t.status != "queued":
+        return JSONResponse({"error": f"invalid status transition from {t.status}"}, status_code=400)
+    try:
+        t.status = "processing"
+        t.updated_at = __import__("datetime").datetime.now().isoformat()
+        # Persist via update_task_result with same result (None) and status.
+        update_task_result(task_id, t.result, status="processing")
+        return JSONResponse({"ok": True, "task": t.model_dump()})
+    except Exception as e:
+        logger.exception("claim_task failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/agents/task/{task_id}/result")
+async def task_result(task_id: str, request: Request):
+    """Accept JSON body {status: 'completed'|'error', result: {...}} and persist."""
+    body = await request.json()
+    status = body.get("status", "completed")
+    result = body.get("result")
+    if status not in ("completed", "error", "processing"):
+        return JSONResponse({"error": "invalid status"}, status_code=400)
+    ok = update_task_result(task_id, result, status=status)
+    if not ok:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    t = load_task(task_id)
+    return JSONResponse({"ok": True, "task": t.model_dump()})
 
 def _ws_auth_ok(websocket: WebSocket) -> bool:
     """Validate token + origin before accepting a WS. Returns True if OK.
