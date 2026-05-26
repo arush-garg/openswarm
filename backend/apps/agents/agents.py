@@ -59,6 +59,42 @@ async def launch_agent(config: AgentConfig):
     session = await agent_manager.launch_agent(config)
     return {"session_id": session.id, "session": session.model_dump(mode="json")}
 
+
+async def create_agent(body: dict):
+    """Create a child agent inheriting properties from a sender session.
+
+    This helper is used by tests and callers that want the same behavior
+    as the Dashboard "Create Agent" flow. It launches the agent and
+    sends an initial message if provided.
+    """
+    sender_id = body.get("sender_session_id")
+    parent = agent_manager.get_session(sender_id)
+    if not parent:
+        try:
+            parent = await agent_manager.resume_session(sender_id)
+        except Exception:
+            parent = None
+
+    config = AgentConfig(
+        name=body.get("name") or ("Agent"),
+        model=(getattr(parent, "model", None) or body.get("model") or "sonnet"),
+        mode=body.get("mode", "agent"),
+        provider=getattr(parent, "provider", "anthropic"),
+        system_prompt=getattr(parent, "system_prompt", None),
+        allowed_tools=getattr(parent, "allowed_tools", []) or [],
+        is_persistent=bool(body.get("persistent", False)),
+        parent_session_id=getattr(parent, "id", None),
+        dashboard_id=getattr(parent, "dashboard_id", None),
+    )
+
+    session = await agent_manager.launch_agent(config)
+
+    prompt = body.get("prompt")
+    if prompt:
+        await agent_manager.send_message(session.id, prompt)
+
+    return {"session_id": session.id, "session": session.model_dump(mode="json")}
+
 @agents.router.post("/sessions/{session_id}/message")
 async def send_message(session_id: str, body: dict):
     prompt = body.get("prompt", "")
