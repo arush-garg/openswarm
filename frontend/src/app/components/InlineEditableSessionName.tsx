@@ -65,7 +65,13 @@ const InlineEditableSessionName: React.FC<InlineEditableSessionNameProps> = ({
   if (editing) {
     return (
       <ClickAwayListener onClickAway={cancelEditing}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0, ...containerSx }}>
+        <Box 
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+          sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0, userSelect: 'text', ...containerSx }}
+        >
           <TextField
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -113,16 +119,36 @@ const InlineEditableSessionName: React.FC<InlineEditableSessionNameProps> = ({
     );
   }
 
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    startEditing();
+  };
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    startEditing();
+  };
+
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0, ...containerSx }}>
-      <Typography noWrap onDoubleClick={startEditing} sx={{ minWidth: 0, ...textSx }}>
+    <Box 
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0, ...containerSx }}
+    >
+      <Typography 
+        noWrap 
+        onClick={handleClick}
+        onDoubleClick={handleDoubleClick} 
+        sx={{ minWidth: 0, cursor: disabled ? 'default' : 'text', ...textSx }}
+      >
         {value || placeholder}
       </Typography>
       {!disabled && (
         <Tooltip title="Rename" arrow>
           <IconButton
             size={buttonSize}
-            onClick={startEditing}
+            onClick={handleClick}
             sx={{ flexShrink: 0, color: 'inherit', opacity: 0.75, '&:hover': { opacity: 1 } }}
           >
             <EditOutlinedIcon sx={{ fontSize: 16 }} />
