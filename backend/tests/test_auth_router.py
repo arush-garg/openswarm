@@ -245,10 +245,7 @@ def test_browser_token_rejects_non_first_party_origin(reset_settings):
         headers={"Origin": "https://evil.example", "Host": "localhost:8324"},
     )
     assert r.status_code == 403
-
-
-# ---------------------------------------------------------------------------
-# /api/auth/identity-status — gate-state for the renderer
+# /api/auth/identity-status, gate-state for the renderer
 # ---------------------------------------------------------------------------
 
 def test_identity_status_signed_in_user_returns_authed_true(client, reset_settings):

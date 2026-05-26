@@ -39,15 +39,31 @@ if (process.argv.includes('--prewarm') && process.platform === 'win32') {
   process.exit(0);
 }
 
+// Squirrel hands shortcut creation to the app: when we intercept --squirrel-*
+// ourselves, Update.exe won't make the Start Menu / Desktop icons unless we ask
+// it to. Skip this and the user only ever sees Setup.exe, no app to click.
+function _squirrelUpdate(args) {
+  try {
+    const updateExe = path.resolve(path.dirname(process.execPath), '..', 'Update.exe');
+    const exeName = path.basename(process.execPath);
+    execFileSync(updateExe, [...args, exeName], { timeout: 20000, stdio: 'ignore', windowsHide: true });
+  } catch (_) {}
+}
+
 // Squirrel.Windows lifecycle: app is invoked with --squirrel-* args during install/update/uninstall. Handle and exit fast; --squirrel-firstrun is the only one we let fall through to normal boot.
 (function handleSquirrelEvents() {
   if (process.platform !== 'win32' || process.argv.length < 2) return;
   const sq = process.argv[1];
   if (sq === '--squirrel-install' || sq === '--squirrel-updated') {
+    _squirrelUpdate(['--createShortcut']);
     _squirrelPrewarmTouch();
     process.exit(0);
   }
-  if (sq === '--squirrel-uninstall' || sq === '--squirrel-obsolete') {
+  if (sq === '--squirrel-uninstall') {
+    _squirrelUpdate(['--removeShortcut']);
+    process.exit(0);
+  }
+  if (sq === '--squirrel-obsolete') {
     process.exit(0);
   }
 })();

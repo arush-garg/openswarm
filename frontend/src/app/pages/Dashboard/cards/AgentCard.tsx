@@ -17,7 +17,8 @@ import {
   handleApproval,
   collapseSession,
   closeSession,
-  
+  updateSessionName,
+  persistSessionName,
 } from '@/shared/state/agentsSlice';
 import {
   setCardPosition,
@@ -29,6 +30,7 @@ import {
 import { useAppDispatch, useAppSelector } from '@/shared/hooks';
 import { QuestionForm } from '@/app/pages/AgentChat/shell/ApprovalBar';
 import AgentChat from '@/app/pages/AgentChat/AgentChat';
+import InlineEditableSessionName from '@/app/components/InlineEditableSessionName';
 import { parseMcpToolName, getMcpShortAction } from '@/shared/mcpToolMeta';
 import { useClaudeTokens } from '@/shared/styles/ThemeContext';
 import { useDashboardActive } from '@/shared/hooks/useDashboardActive';
@@ -596,6 +598,17 @@ const AgentCard: React.FC<Props> = ({
     }
   };
 
+  const renameSession = useCallback(async (nextName: string) => {
+    const previous = session.name;
+    try {
+      dispatch(updateSessionName({ sessionId: session.id, name: nextName }));
+      await dispatch(persistSessionName({ sessionId: session.id, name: nextName })).unwrap();
+    } catch (err) {
+      // rollback on failure
+      dispatch(updateSessionName({ sessionId: session.id, name: previous }));
+    }
+  }, [dispatch, session.id, session.name]);
+
 
   // Elapsed-time display owns its own 1Hz tick via <ElapsedTimer/> below;
   // we don't force-re-render the whole 1000+ line AgentCard every second
@@ -975,9 +988,19 @@ const AgentCard: React.FC<Props> = ({
               borderRadius: 1,
             }}
           >
-            <Typography sx={{ color: c.text.primary, fontWeight: 600, fontSize: '0.95rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {session.name}
-            </Typography>
+            <Box 
+              onPointerDown={(e) => e.stopPropagation()} 
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+              sx={{ flex: 1, minWidth: 0, userSelect: 'text' }}
+            >
+              <InlineEditableSessionName
+                value={session.name}
+                onCommit={renameSession}
+                textSx={{ color: c.text.primary, fontWeight: 600, fontSize: '0.95rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                disabled={isDraft}
+              />
+            </Box>
             <Chip
               label={session.status.replace('_', ' ')}
               size="small"

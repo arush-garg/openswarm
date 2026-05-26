@@ -202,7 +202,9 @@ const AccountCard: React.FC = () => {
   // settings edits (e.g. theme toggle) don't re-render this card.
   const userEmail = useAppSelector((s) => s.settings.data.user_email ?? null);
   const userId = useAppSelector((s) => s.settings.data.user_id ?? null);
-  const signinMethod = useAppSelector((s) => s.settings.data.signin_method ?? null);
+  const signinMethod = useAppSelector(
+    (s) => s.settings.data.signin_method ?? null,
+  ) as AppSettings['signin_method'];
   const hasBearer = useAppSelector((s) => Boolean(s.settings.data.openswarm_bearer_token));
   const installId = useAppSelector((s) => s.settings.data.installation_id ?? '');
   const proxyUrl = useAppSelector((s) => s.settings.data.openswarm_proxy_url || OPENSWARM_DEFAULT_PROXY_URL);

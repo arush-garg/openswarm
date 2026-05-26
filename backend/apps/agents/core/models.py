@@ -140,3 +140,10 @@ class AgentSession(BaseModel):
     context_window: int = 200_000
     # Provider-agnostic thinking level (off/low/medium/high/auto), translated per-API in agent_manager; only affects reasoning-flagged models.
     thinking_level: Literal["off", "low", "medium", "high", "auto"] = "auto"
+    # Worker mode: session acts as a durable worker that can accept tasks
+    # from TaskEnvelope queues. 'worker' sessions persist and are not
+    # auto-removed when parent completes.
+    is_worker: bool = False
+    # If worker, indicates current status: 'idle', 'busy'. Useful for
+    # routing and dashboard display.
+    worker_status: Literal["idle", "busy"] = "idle"

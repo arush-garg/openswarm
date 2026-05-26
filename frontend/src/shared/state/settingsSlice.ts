@@ -68,15 +68,11 @@ export interface AppSettings {
   openswarm_subscription_plan?: string | null;
   openswarm_subscription_expires?: string | null;
   openswarm_usage_cached?: SubscriptionUsage | null;
-  // Identity (v1.0.29+). Populated after a successful Google/email sign-in via
-  // /api/auth/signin-activate. Stripe checkout also populates these because
-  // the cloud's bearer-mint always returns user info.
+  /** Identity populated by /api/auth/signin-activate; Stripe checkout also fills these. */
   user_id?: string | null;
   user_email?: string | null;
   signin_method?: 'google' | 'stripe' | 'email' | null;
-  // Anonymous device identifier. Generated locally on first run, persists
-  // across launches. Used to bind cloud OAuth flows to this install and to
-  // stitch anonymous → authenticated PostHog Persons after sign-in.
+  /** Anonymous device id (first-run generated); stitches anon to authed PostHog Persons. */
   installation_id?: string | null;
 }
 

@@ -60,67 +60,40 @@ async def launch_agent(config: AgentConfig):
     return {"session_id": session.id, "session": session.model_dump(mode="json")}
 
 
-@agents.router.post("/create")
 async def create_agent(body: dict):
-    parent_session_id = body.get("parent_session_id") or body.get("sender_session_id")
-    prompt = body.get("prompt") or body.get("task") or ""
-    if not parent_session_id:
-        raise HTTPException(status_code=400, detail="parent_session_id is required")
-    if not prompt:
-        raise HTTPException(status_code=400, detail="prompt is required")
+    """Create a child agent inheriting properties from a sender session.
 
-    parent = agent_manager.get_session(parent_session_id)
+    This helper is used by tests and callers that want the same behavior
+    as the Dashboard "Create Agent" flow. It launches the agent and
+    sends an initial message if provided.
+    """
+    sender_id = body.get("sender_session_id")
+    parent = agent_manager.get_session(sender_id)
     if not parent:
         try:
-            parent = await agent_manager.resume_session(parent_session_id)
-        except ValueError:
-            raise HTTPException(status_code=404, detail="Parent session not found")
-
-    persistence_raw = body.get("persistence", body.get("persistent"))
-    is_persistent = False
-    if isinstance(persistence_raw, str):
-        is_persistent = persistence_raw.strip().lower() in ("persistent", "persist", "true", "yes")
-    elif isinstance(persistence_raw, bool):
-        is_persistent = persistence_raw
-
-    mode = body.get("mode") or ("agent" if is_persistent else "sub-agent")
-    system_prompt = body.get("system_prompt")
-    if system_prompt is None and is_persistent:
-        system_prompt = parent.system_prompt
+            parent = await agent_manager.resume_session(sender_id)
+        except Exception:
+            parent = None
 
     config = AgentConfig(
-        name=body.get("name") or f"{parent.name} Child",
-        model=body.get("model") or parent.model,
-        mode=mode,
-        provider=body.get("provider") or parent.provider,
-        system_prompt=system_prompt,
-        allowed_tools=list(parent.allowed_tools),
-        dashboard_id=body.get("dashboard_id") or parent.dashboard_id,
-        parent_session_id=parent.id,
-        is_persistent=is_persistent,
-        target_directory=body.get("target_directory") or parent.cwd,
-        max_turns=body.get("max_turns"),
+        name=body.get("name") or ("Agent"),
+        model=(getattr(parent, "model", None) or body.get("model") or "sonnet"),
+        mode=body.get("mode", "agent"),
+        provider=getattr(parent, "provider", "anthropic"),
+        system_prompt=getattr(parent, "system_prompt", None),
+        allowed_tools=getattr(parent, "allowed_tools", []) or [],
+        is_persistent=bool(body.get("persistent", False)),
+        parent_session_id=getattr(parent, "id", None),
+        dashboard_id=getattr(parent, "dashboard_id", None),
     )
 
     session = await agent_manager.launch_agent(config)
 
-    await agent_manager.send_message(
-        session.id,
-        prompt,
-        mode=body.get("message_mode") or body.get("mode"),
-        model=body.get("message_model") or body.get("model"),
-        images=body.get("images"),
-        context_paths=body.get("context_paths"),
-        forced_tools=body.get("forced_tools"),
-        attached_skills=body.get("attached_skills"),
-        selected_browser_ids=body.get("selected_browser_ids"),
-        client_message_id=body.get("client_message_id"),
-    )
+    prompt = body.get("prompt")
+    if prompt:
+        await agent_manager.send_message(session.id, prompt)
 
     return {"session_id": session.id, "session": session.model_dump(mode="json")}
-
-
-
 
 @agents.router.post("/sessions/{session_id}/message")
 async def send_message(session_id: str, body: dict):
@@ -164,26 +137,6 @@ async def send_message(session_id: str, body: dict):
         client_message_id=body.get("client_message_id"),
     )
     return {"ok": True}
-
-
-@agents.router.post("/route")
-async def route_message(body: dict):
-    target = body.get("target_session_id") or body.get("session_id") or body.get("recipient")
-    prompt = body.get("prompt") or body.get("message") or body.get("task")
-    sender = body.get("sender_session_id") or body.get("parent_session_id")
-    if not target or not prompt:
-        raise HTTPException(status_code=400, detail="target_session_id and prompt are required")
-    if not sender:
-        raise HTTPException(status_code=400, detail="sender_session_id is required")
-    try:
-        result = await agent_manager.route_message(sender, target, prompt, mode=body.get("mode"))
-        return result
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
 
 @agents.router.post("/sessions/{session_id}/stop")
 async def stop_agent(session_id: str):

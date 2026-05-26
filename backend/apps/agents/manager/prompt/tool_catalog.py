@@ -6,6 +6,8 @@ FULL_TOOLS = [
     "CronCreate", "CronList", "CronDelete",
     "InvokeAgent",
     "Agent",
+    "SendToAgent",
+    "ListAgents",
     # ToolSearch is the loader the CLI uses to expose deferred tool schemas
     # on demand. Must be in the allowedTools whitelist or the model can't
     # call it, which means none of the deferred extended tools become

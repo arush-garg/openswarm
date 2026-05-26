@@ -378,6 +378,18 @@ export const updateSystemPrompt = createAsyncThunk(
   }
 );
 
+export const persistSessionName = createAsyncThunk(
+  'agents/persistSessionName',
+  async ({ sessionId, name }: { sessionId: string; name: string }) => {
+    await fetch(`${AGENTS_API}/sessions/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    return { sessionId, name };
+  }
+);
+
 export const updateThinkingLevel = createAsyncThunk(
   'agents/updateThinkingLevel',
   async ({ sessionId, level }: { sessionId: string; level: 'off' | 'low' | 'medium' | 'high' | 'auto' }) => {
@@ -1100,6 +1112,12 @@ const agentsSlice = createSlice({
         const session = state.sessions[action.payload.sessionId];
         if (session) {
           session.system_prompt = action.payload.systemPrompt;
+        }
+      })
+      .addCase(persistSessionName.fulfilled, (state, action) => {
+        const session = state.sessions[action.payload.sessionId];
+        if (session) {
+          session.name = action.payload.name;
         }
       })
       .addCase(sendMessage.pending, (state, action) => {
