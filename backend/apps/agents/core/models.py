@@ -13,8 +13,6 @@ class AgentConfig(BaseModel):
     max_turns: Optional[int] = None
     target_directory: Optional[str] = None
     dashboard_id: Optional[str] = None
-    parent_session_id: Optional[str] = None
-    is_persistent: bool = False
 
 class ApprovalRequest(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
@@ -118,9 +116,6 @@ class AgentSession(BaseModel):
     dashboard_id: Optional[str] = None
     browser_id: Optional[str] = None
     parent_session_id: Optional[str] = None
-    is_worker: bool = False
-    worker_status: Literal["idle", "busy"] = "idle"
-    is_persistent: bool = False
     needs_fork: bool = False
     # Stronger than needs_fork: drop resume= and replay history into a fresh sdk_session_id; fork_session alone won't re-read mcp_servers.
     needs_fresh_session: bool = False

@@ -3,7 +3,6 @@ import { useNavigate, useParams } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import Chip from '@mui/material/Chip';
-import Collapse from '@mui/material/Collapse';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import TextField from '@mui/material/TextField';
@@ -31,10 +30,7 @@ import {
   switchBranch,
   duplicateSession,
   setActiveSession,
-  updateSessionName,
-  persistSessionName,
   updateSessionModel,
-  persistSessionModel,
   updateSessionMode,
   updateSessionThinkingLevel,
   updateThinkingLevel,
@@ -45,24 +41,24 @@ import {
 } from '@/shared/state/agentsSlice';
 import { fetchModes } from '@/shared/state/modesSlice';
 import { createSessionWs } from '@/shared/ws/WebSocketManager';
-import StreamingBubble from './StreamingBubble';
-import MessageBubble from './MessageBubble';
-import CompactionMarker from './CompactionMarker';
-import MessageActionBar from './MessageActionBar';
-import ToolCallBubble, { ToolPair } from './ToolCallBubble';
-import ToolGroupBubble, { RenderItem, ToolGroup, isToolGroup, isToolPair } from './ToolGroupBubble';
-import ApprovalBar, { BatchApprovalBar } from './ApprovalBar';
+import StreamingBubble from './bubbles/StreamingBubble';
+import MessageBubble from './bubbles/MessageBubble';
+import CompactionMarker from './bubbles/CompactionMarker';
+import MessageActionBar from './shell/MessageActionBar';
+import ToolCallBubble, { ToolPair } from './tool-bubbles/ToolCallBubble';
+import ToolGroupBubble, { RenderItem, ToolGroup, isToolGroup, isToolPair } from './tool-bubbles/ToolGroupBubble';
+import ApprovalBar, { BatchApprovalBar } from './shell/ApprovalBar';
 import ChatInput, { ChatInputHandle } from './ChatInput';
-import ContextDrawer from './ContextDrawer';
-import InlineEditableSessionName from '@/app/components/InlineEditableSessionName';
-import { ErrorSlime } from '@/app/components/ErrorSlime';
-import { ContextPath } from '@/app/components/DirectoryBrowser';
+import ContextDrawer from './shell/ContextDrawer';
+import { ErrorSlime } from '@/app/components/feedback/ErrorSlime';
+import { ContextPath } from '@/app/components/editor/DirectoryBrowser';
 import { setGlowingBrowserCards, fadeGlowingBrowserCards, clearGlowingBrowserCards } from '@/shared/state/dashboardLayoutSlice';
 import { useClaudeTokens } from '@/shared/styles/ThemeContext';
 
 const CONTEXT_WINDOWS: Record<string, number> = {
-  sonnet: 200_000,
-  opus: 200_000,
+  'opus-4-7': 1_000_000,
+  opus: 1_000_000,
+  sonnet: 1_000_000,
   haiku: 200_000,
 };
 
@@ -97,36 +93,27 @@ function streamingLabelFor(seedKey: string | undefined): string {
   return STREAMING_LABELS[Math.abs(h) % STREAMING_LABELS.length];
 }
 
-const ThinkingBubble: React.FC<{ label?: string | null; seedKey?: string; activity?: ActivityEntry[] }> = ({ label, seedKey, activity = [] }) => {
+const ThinkingBubble: React.FC<{ label?: string | null; seedKey?: string }> = ({ label, seedKey }) => {
   const c = useClaudeTokens();
   const shimmerBase = c.text.tertiary;
   const shimmerHighlight = c.text.primary;
   // Aux-LLM label wins; otherwise pick a quirky verb keyed off seedKey
   // so different sessions / turns show different verbs without flicker.
   const display = label ? `${label}…` : `${streamingLabelFor(seedKey)}…`;
-  const [expanded, setExpanded] = useState(false);
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-start', my: 0.75 }}>
+    <Box sx={{ display: 'flex', justifyContent: 'flex-start', my: 0.75 }}>
       <style>{thinkingShimmerKeyframes}</style>
       <Box
-        onClick={() => setExpanded((prev) => !prev)}
         sx={{
           bgcolor: c.bg.surface,
           border: `1px solid ${c.border.subtle}`,
           borderRadius: '16px 16px 16px 4px',
           px: 2,
-          py: 1.25,
+          py: 1.5,
           boxShadow: c.shadow.sm,
           display: 'flex',
           alignItems: 'center',
           minHeight: 36,
-          cursor: 'pointer',
-          userSelect: 'none',
-          transition: 'all 0.15s ease',
-          '&:hover': {
-            bgcolor: c.bg.secondary,
-            borderColor: c.border.medium,
-          },
         }}
       >
         <Box
@@ -147,47 +134,6 @@ const ThinkingBubble: React.FC<{ label?: string | null; seedKey?: string; activi
           {display}
         </Box>
       </Box>
-      <Collapse in={expanded} timeout={180} unmountOnExit>
-        <Box
-          sx={{
-            mt: 0.75,
-            ml: 0.5,
-            pl: 1.5,
-            borderLeft: `2px solid ${c.border.subtle}`,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 0.75,
-            minWidth: 0,
-          }}
-        >
-          <Typography sx={{ fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: c.text.tertiary }}>
-            Current activity
-          </Typography>
-          {activity.length ? activity.map((entry) => (
-            <Box
-              key={entry.id}
-              sx={{
-                border: `1px solid ${c.border.subtle}`,
-                bgcolor: c.bg.surface,
-                borderRadius: 1.25,
-                px: 1.25,
-                py: 1,
-              }}
-            >
-              <Typography sx={{ fontSize: '0.68rem', fontWeight: 700, color: c.text.secondary, textTransform: 'uppercase', letterSpacing: '0.06em', mb: 0.5 }}>
-                {entry.title}
-              </Typography>
-              <Typography sx={{ fontSize: '0.78rem', color: c.text.primary, lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                {entry.detail}
-              </Typography>
-            </Box>
-          )) : (
-            <Typography sx={{ fontSize: '0.78rem', color: c.text.tertiary, fontStyle: 'italic' }}>
-              No logs have landed yet. The agent is still warming up.
-            </Typography>
-          )}
-        </Box>
-      </Collapse>
     </Box>
   );
 };
@@ -199,12 +145,6 @@ interface QueuedMessage {
   forcedTools?: string[];
   attachedSkills?: Array<{ id: string; name: string; content: string }>;
   selectedBrowserIds?: string[];
-}
-
-interface ActivityEntry {
-  id: string;
-  title: string;
-  detail: string;
 }
 
 interface AgentChatProps {
@@ -264,17 +204,6 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
   const [mode, setMode] = useState('agent');
   const [model, setModel] = useState('sonnet');
 
-  const renameSession = useCallback(async (nextName: string) => {
-    if (!id || !session) return;
-    const previousName = session.name;
-    dispatch(updateSessionName({ sessionId: id, name: nextName }));
-    try {
-      await dispatch(persistSessionName({ sessionId: id, name: nextName })).unwrap();
-    } catch {
-      dispatch(updateSessionName({ sessionId: id, name: previousName }));
-    }
-  }, [dispatch, id, session]);
-
   const wsRef = useRef<ReturnType<typeof createSessionWs> | null>(null);
   const initialContextApplied = useRef(false);
   const messageQueueRef = useRef<QueuedMessage[]>([]);
@@ -296,7 +225,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
     // events starting at last_seq=0, which includes every stream_*
     // event for messages that finished before the disconnect. The
     // replay-skip guard in WebSocketManager._messageAlreadyComplete
-    // checks `session.messages` to decide whether to drop deltas — so
+    // checks `session.messages` to decide whether to drop deltas , so
     // if we connect first, the slice is empty when the replay arrives,
     // the guard returns false, and the user sees the chat type itself
     // out again. Awaiting fetchSession before connect makes the slice
@@ -305,7 +234,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
       try {
         await dispatch(fetchSession(id));
       } catch {
-        // Even if the REST hydrate fails, still connect — the WS resume
+        // Even if the REST hydrate fails, still connect , the WS resume
         // protocol can hydrate from buffered events as a fallback.
       }
       if (cancelled) return;
@@ -564,11 +493,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
 
   const handleModelChange = useCallback((newModel: string) => {
     setModel(newModel);
-    if (!id) return;
-    dispatch(updateSessionModel({ sessionId: id, model: newModel }));
-    if (!isDraft) {
-      dispatch(persistSessionModel({ sessionId: id, model: newModel }));
-    }
+    if (id && !isDraft) dispatch(updateSessionModel({ sessionId: id, model: newModel }));
   }, [id, isDraft, dispatch]);
 
   const handleThinkingLevelChange = useCallback((level: 'off' | 'low' | 'medium' | 'high' | 'auto') => {
@@ -695,15 +620,22 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
   }, [id, dispatch, onBranch, session?.dashboard_id]);
 
   const contextEstimate = useMemo(() => {
-    // Look up the actual context window from the models store (backend
-    // registry is the source of truth). Fall back to the legacy hardcoded
-    // map for any model that isn't in the store yet.
+    // Prefer the live API-reported input token count once we have one
+    // (session.tokens.input includes the full request: messages + system +
+    // tool defs + cached prefix). That number is authoritative because
+    // Anthropic counts it against the context window. Before the first
+    // turn completes, fall back to a char/4 estimate of visible message
+    // content as a rough pre-send hint.
     let limit = 0;
     for (const ms of Object.values(modelsByProvider)) {
       const hit = ms.find((m) => m.value === model);
       if (hit?.context_window) { limit = hit.context_window; break; }
     }
-    if (!limit) limit = CONTEXT_WINDOWS[model] || 200_000;
+    if (!limit) limit = (session?.context_window) || CONTEXT_WINDOWS[model] || 200_000;
+    const liveInput = session?.tokens?.input ?? 0;
+    if (liveInput > 0) {
+      return { used: liveInput, limit };
+    }
     let totalChars = 0;
     if (session?.system_prompt) totalChars += session.system_prompt.length;
     for (const msg of activeBranchMessages) {
@@ -716,7 +648,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
     // text and re-run this sum on every painted character, defeating
     // the whole point of isolating AgentChat from delta updates. The
     // header gauge will catch up when stream_end commits the message.
-  }, [activeBranchMessages, session?.system_prompt, streamingMessageId, model, modelsByProvider]);
+  }, [activeBranchMessages, session?.system_prompt, session?.tokens?.input, session?.context_window, streamingMessageId, model, modelsByProvider]);
 
   const sessionRunning = session?.status === 'running' || session?.status === 'waiting_approval';
 
@@ -901,42 +833,6 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
 
   const isActive = session.status === 'running' || session.status === 'waiting_approval' || session.status === 'draft';
   const statusStyle = STATUS_STYLES[session.status] || { color: c.text.tertiary, bg: c.bg.secondary };
-  const currentTurnActivity = useMemo(() => {
-    const messages = session.messages || [];
-    if (!messages.length) return [];
-
-    let lastUserIdx = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].branch_id !== session.active_branch_id) continue;
-      if (messages[i].role === 'user') {
-        lastUserIdx = i;
-        break;
-      }
-    }
-
-    const currentSlice = lastUserIdx >= 0 ? messages.slice(lastUserIdx + 1) : messages;
-    return currentSlice
-      .filter((message) => message.branch_id === session.active_branch_id && ['thinking', 'system', 'tool_call', 'tool_result'].includes(message.role))
-      .slice(-6)
-      .map((message) => {
-        let detail = stringifyContent(message.content).trim();
-        if (message.role === 'tool_call' && typeof message.content === 'object' && message.content) {
-          const toolName = typeof message.content.tool === 'string' ? message.content.tool : '';
-          const input = stringifyContent(message.content.input).trim();
-          detail = [toolName, input].filter(Boolean).join(' · ') || '(empty tool call)';
-        }
-        if (!detail) detail = '(empty)';
-        if (detail.length > 240) detail = `${detail.slice(0, 237)}…`;
-        const title = message.role === 'thinking'
-          ? 'Thinking'
-          : message.role === 'tool_call'
-            ? 'Tool call'
-            : message.role === 'tool_result'
-              ? 'Tool result'
-              : 'System log';
-        return { id: message.id, title, detail } satisfies ActivityEntry;
-      });
-  }, [session.messages, session.active_branch_id]);
 
   return (
     <Box sx={{ display: 'flex', height: '100%' }}>
@@ -962,11 +858,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
           >
             <Box sx={{ flex: 1, minWidth: 0 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <InlineEditableSessionName
-                  value={session.name}
-                  onCommit={renameSession}
-                  textSx={{ color: c.text.primary, fontWeight: 600, fontSize: '0.95rem' }}
-                />
+                <Typography noWrap sx={{ color: c.text.primary, fontWeight: 600 }}>{session.name}</Typography>
                 {!isDraft && statusStyle && (
                   <Chip
                     label={session.status.replace('_', ' ')}
@@ -993,7 +885,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
                     if (!(session.cost_usd > 0)) return null;
                     // The SDK reports a per-call $ figure regardless of how
                     // the request was routed. For requests that went through
-                    // a subscription path, that figure is misleading — the
+                    // a subscription path, that figure is misleading , the
                     // user pays flat-rate. Show "subscription" instead in
                     // those cases. Show $ only when the call was actually
                     // metered (Anthropic API key, OpenAI API key, etc.).
@@ -1027,7 +919,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
                         <Typography
                           variant="caption"
                           sx={{ color: c.text.tertiary }}
-                          title="Routed through subscription — flat-rate, per-call cost not metered"
+                          title="Routed through subscription, flat-rate, per-call cost not metered"
                         >
                           subscription
                         </Typography>
@@ -1042,18 +934,42 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
                     );
                   })()}
                   {(() => {
-                    const pct = session.ctx_used_pct ?? 0;
-                    if (!pct) return null;
-                    const pctTxt = `${Math.round(pct * 100)}%`;
-                    const color = pct >= 0.9 ? '#ef4444' : pct >= 0.7 ? '#f59e0b' : c.text.tertiary;
+                    const liveWindow = session.context_window || contextEstimate.limit || 200_000;
+                    const liveInput = session.tokens?.input ?? 0;
+                    const pct = liveInput > 0
+                      ? Math.min(1, liveInput / Math.max(1, liveWindow))
+                      : (contextEstimate.used / Math.max(1, liveWindow));
                     const mcpCount = session.active_mcps?.length ?? 0;
+                    // Quiet until it matters: hide the memory meter until the chat is filling up,
+                    // and hide the tool count unless tools are actually connected.
+                    const showMemory = pct >= 0.60;
+                    const showTools = mcpCount > 0;
+                    if (!showMemory && !showTools) return null;
+                    const pctTxt = `${Math.round(pct * 100)}%`;
+                    const memColor = pct >= 0.85 ? '#ef4444' : '#f59e0b';
+                    const tip = [
+                      showMemory ? `Memory ${pctTxt} full. As the chat fills up, the oldest messages start dropping out.` : null,
+                      showTools ? `${mcpCount} tool${mcpCount === 1 ? '' : 's'} connected.` : null,
+                    ].filter(Boolean).join('\n');
                     return (
                       <Typography
                         variant="caption"
-                        sx={{ color, fontVariantNumeric: 'tabular-nums' }}
-                        title={`Context ${pctTxt} of 200K · ${mcpCount} MCP${mcpCount === 1 ? '' : 's'} active`}
+                        sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, fontVariantNumeric: 'tabular-nums' }}
+                        title={tip}
                       >
-                        {pctTxt} ctx · {mcpCount} mcp
+                        {showMemory && (
+                          <Box component="span" sx={{ color: memColor, fontWeight: 500 }}>
+                            Memory {pctTxt} full
+                          </Box>
+                        )}
+                        {showMemory && showTools && (
+                          <Box component="span" sx={{ color: c.text.ghost }}>·</Box>
+                        )}
+                        {showTools && (
+                          <Box component="span" sx={{ color: c.text.tertiary }}>
+                            {mcpCount} tool{mcpCount === 1 ? '' : 's'}
+                          </Box>
+                        )}
                       </Typography>
                     );
                   })()}
@@ -1066,6 +982,14 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
                   size="small"
                   onClick={async () => {
                     const sid = id;
+                    // Reset local UI state first; clearSessionMessages only touches Redux session.messages, so showResumeBubble/awaitingResponse/the queue otherwise survive and a "thinking" or "Resume agent response" bubble lingers on a now-empty chat.
+                    setShowResumeBubble(false);
+                    setAwaitingResponse(false);
+                    messageQueueRef.current = [];
+                    setQueueLength(0);
+                    setQueueExpanded(false);
+                    setEditingQueueIdx(null);
+                    setEditingQueueText('');
                     try {
                       const tok = (() => { try { return getAuthToken(); } catch { return ''; } })();
                       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -1097,18 +1021,18 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
               overflow: 'auto',
               px: 2,
               py: 1,
-              // Smoothness bundle (perf-only — no behavior change):
-              //   1. overflow-anchor: auto — Chromium's native scroll
+              // Smoothness bundle (perf-only , no behavior change):
+              //   1. overflow-anchor: auto , Chromium's native scroll
               //      anchoring keeps the viewport pinned to the user's
               //      visible content as siblings above/below resize.
               //      Eliminates the "transcript snaps back" feel during
               //      streaming and parallel tool fan-outs. Runs on the
               //      compositor thread, free.
-              //   2. contain: layout — tells the browser layout shifts
+              //   2. contain: layout , tells the browser layout shifts
               //      inside this scroll container don't affect siblings
               //      outside it. Prevents reflow from cascading up to
               //      the dashboard layout when bubbles grow.
-              //   3. overscroll-behavior: contain — keeps over-scroll
+              //   3. overscroll-behavior: contain , keeps over-scroll
               //      gestures from leaking up to the dashboard pan/zoom
               //      when the user hits the chat top/bottom.
               overflowAnchor: 'auto',
@@ -1394,7 +1318,6 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
               <ThinkingBubble
                 label={session.turn_label?.label}
                 seedKey={`${session.id}:${session.messages?.length ?? 0}`}
-                activity={currentTurnActivity}
               />
             )}
             {showResumeBubble && session.status === 'stopped' && (
@@ -1734,7 +1657,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
                         Haiku is the fastest Claude model but holds the least at once.
                         Each connected app adds instructions Claude has to read first.
                         If your message fails with “Prompt is too long,” turn off a few
-                        apps (Microsoft 365 is the heaviest) or switch to Sonnet/Opus —
+                        apps (Microsoft 365 is the heaviest) or switch to Sonnet/Opus,
                         both have 5× more room.
                       </Typography>
                     </Box>

@@ -34,30 +34,13 @@ BUILTIN_TOOLS: list[BuiltinTool] = [
     BuiltinTool(name="CronList", description="List all scheduled tasks", category="scheduling", deferred=True),
     BuiltinTool(name="CronDelete", description="Delete a scheduled task", category="scheduling", deferred=True),
     # Agent tools
-    BuiltinTool(
-        name="Agent",
-        display_name="CreateAgent",
-        description=(
-            "Spawn a sub-agent to handle a complex subtask. The supported OpenSwarm path is the "
-            "backend CreateAgent MCP tool. Use persistence='persistent' (or persistent=true) to "
-            "create a persistent subagent; omit it for a temporary subagent."
-        ),
-        category="agents",
-    ),
+    BuiltinTool(name="Agent", display_name="CreateAgent", description="Spawn a sub-agent to handle a complex subtask", category="agents"),
     BuiltinTool(name="InvokeAgent", description="Invoke a copy of an existing agent with a new message, preserving full conversation context", category="agents"),
-    BuiltinTool(
-        name="SendToAgent",
-        description=(
-            "Route a message to another persistent agent session. "
-            "Only persistent agents should use this tool."
-        ),
-        category="agents",
-    ),
-    # Browser delegation tools (Layer 1 — what the main agent calls)
+    # Browser delegation tools (Layer 1, what the main agent calls)
     BuiltinTool(name="CreateBrowserAgent", description="Create a new browser and run a task on it", category="browser_delegation"),
     BuiltinTool(name="BrowserAgent", description="Delegate a browser task to an existing browser agent", category="browser_delegation"),
     BuiltinTool(name="BrowserAgents", description="Run multiple browser tasks in parallel on existing browsers", category="browser_delegation"),
-    # Browser action tools (Layer 2 — what the sub-agent executes)
+    # Browser action tools (Layer 2, what the sub-agent executes)
     BuiltinTool(name="BrowserScreenshot", description="Capture a screenshot of the browser page", category="browser_action"),
     BuiltinTool(name="BrowserNavigate", description="Navigate the browser to a URL", category="browser_action"),
     BuiltinTool(name="BrowserClick", description="Click an element by CSS selector", category="browser_action"),
