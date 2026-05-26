@@ -129,6 +129,22 @@ class AgentManager:
     def __init__(self):
         self.sessions: dict[str, AgentSession] = {}
         self.tasks: dict[str, asyncio.Task] = {}
+        # worker_locks maps worker session id -> asyncio.Lock used by worker runners
+        self.worker_locks: dict[str, asyncio.Lock] = {}
+        # Rehydrate any persisted worker sessions so durable workers are available
+        try:
+            for sid, data in _load_all_session_data():
+                try:
+                    if data.get("is_worker"):
+                        session = AgentSession(**data)
+                        session.pending_approvals = []
+                        _apply_context_window(session)
+                        self.sessions[session.id] = session
+                        self.worker_locks[session.id] = asyncio.Lock()
+                except Exception:
+                    logger.exception("Failed to restore session %s", sid)
+        except Exception:
+            logger.exception("Failed to load persisted sessions on init")
     
     def _resolve_mode(self, mode_id: str) -> tuple[list[str], str | None, str | None]:
         return _resolve_mode(mode_id, get_all_tool_names)
