@@ -1,82 +1,9 @@
-import React, { useEffect, useCallback, useRef, useState, useMemo } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
-import Box from '@mui/material/Box';
-import Typography from '@mui/material/Typography';
-import DashboardHeader from './DashboardHeader';
-import { report } from '@/shared/serviceClient';
-import { useAppDispatch, useAppSelector } from '@/shared/hooks';
-import { store } from '@/shared/state/store';
-import {
-  fetchSessions,
-  fetchHistory,
-  collapseSession,
-  closeSession,
-  duplicateSession,
-  expandSession,
-  launchAndSendFirstMessage,
-  generateTitle,
-  resumeSession,
-  setExpandedSessionIds,
-  toggleExpandSession,
-} from '@/shared/state/agentsSlice';
-import type { AgentConfig } from '@/shared/state/agentsSlice';
-import {
-  fetchLayout,
-  saveLayout,
-  reconcileSessions,
-  tidyLayout,
-  addViewCard,
-  addBrowserCard,
-  moveCards,
-  resetLayout,
-  setGlowingBrowserCards,
-  removeViewCard,
-  removeBrowserCard,
-  pasteBrowserCard,
-  placeCard,
-  setCardPosition,
-  removeCard,
-  bringToFront,
-  setGlowingAgentCard,
-  clearGlowingAgentCard,
-  clearPendingFocusBrowserId,
-  addNote,
-  removeNote,
-  clearPendingFocusNoteId,
-  DEFAULT_CARD_W,
-  DEFAULT_CARD_H,
-  EXPANDED_CARD_MIN_H,
-  GRID_GAP,
-} from '@/shared/state/dashboardLayoutSlice';
-import { fetchOutputs } from '@/shared/state/outputsSlice';
-import { generateDashboardName, updateDashboardThumbnail } from '@/shared/state/dashboardsSlice';
-import { dashboardWs } from '@/shared/ws/WebSocketManager';
-import { initBrowserCommandHandler } from '@/shared/browserCommandHandler';
-import { clearPendingBrowserUrl, clearPendingFocusAgentId } from '@/shared/state/tempStateSlice';
-import AgentCard from './AgentCard';
-import DashboardViewCard from './DashboardViewCard';
-import BrowserCard from './BrowserCard';
-import NoteCard from './NoteCard';
-import CanvasControls from './CanvasControls';
-import CardSearchPalette from './CardSearchPalette';
-import DirectionHints from './DirectionHints';
-// OnboardingWalkthrough was retired in v2 — the new OnboardingRoot/Panel
-// (mounted in Main.tsx) replaces it. Keeping this banner to prevent stale
-// imports from sneaking back in via auto-completion.
-import DashboardToolbar from './DashboardToolbar';
-import { captureDashboardThumbnail } from './captureDashboardThumbnail';
-import { useCanvasControls } from './useCanvasControls';
-import { useDashboardSelection } from './useDashboardSelection';
-import type { CardType } from './useDashboardSelection';
-import { useClaudeTokens } from '@/shared/styles/ThemeContext';
-import type { ContextPath } from '@/app/components/DirectoryBrowser';
-import { ElementSelectionProvider, useElementSelection } from '@/app/components/ElementSelectionContext';
-import { useDomElementSelector } from '@/app/components/useDomElementSelector';
-import SelectionOverlay from '@/app/components/SelectionOverlay';
-import { setClipboardCards, getClipboardCards, type ClipboardCard } from '@/shared/dashboardClipboard';
-import { API_BASE } from '@/shared/config';
-
-const SELECT_ATTR = 'data-select-type';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import SelectionOverlay from '@/app/components/editor/SelectionOverlay';
+import { ElementSelectionProvider } from '@/app/components/editor/ElementSelectionContext';
+import { useDomElementSelector } from '@/app/components/editor/useDomElementSelector';
+import { useDashboardController } from './hooks/state/useDashboardController';
+import DashboardCanvas from './canvas/DashboardCanvas';
 
 const DashboardSelectionOverlay: React.FC = () => {
   const { overlay, dragRect, dragPreview } = useDomElementSelector();
@@ -98,71 +25,60 @@ interface DashboardProps {
 }
 
 const DashboardInner: React.FC<DashboardProps> = ({ dashboardId, isActive = true }) => {
-  const c = useClaudeTokens();
-  const dispatch = useAppDispatch();
-  const elementSelectionCtx = useElementSelection();
-  const isElementSelectMode = elementSelectionCtx?.selectMode ?? false;
-  const dashboardName = useAppSelector((state) =>
-    dashboardId ? state.dashboards.items[dashboardId]?.name : undefined,
-  );
-  const sessions = useAppSelector((state) => state.agents.sessions);
-  const expandedSessionIds = useAppSelector((state) => state.agents.expandedSessionIds);
-  const cards = useAppSelector((state) => state.dashboardLayout.cards);
-  const viewCards = useAppSelector((state) => state.dashboardLayout.viewCards);
-  const browserCards = useAppSelector((state) => state.dashboardLayout.browserCards);
-  const notes = useAppSelector((state) => state.dashboardLayout.notes);
-  const pendingFocusNoteId = useAppSelector((state) => state.dashboardLayout.pendingFocusNoteId);
-  const layoutInitialized = useAppSelector((state) => state.dashboardLayout.initialized);
-  const persistedExpandedSessionIds = useAppSelector((state) => state.dashboardLayout.persistedExpandedSessionIds);
-  const zoomSensitivity = useAppSelector((state) => state.settings.data.zoom_sensitivity);
-  const newAgentShortcut = useAppSelector((state) => state.settings.data.new_agent_shortcut);
-  const browserHomepage = useAppSelector((state) => state.settings.data.browser_homepage);
-  const expandNewChats = useAppSelector((state) => state.settings.data.expand_new_chats_in_dashboard);
-  const autoRevealSubAgents = useAppSelector((state) => state.settings.data.auto_reveal_sub_agents);
-  const outputs = useAppSelector((state) => state.outputs.items);
-  const outputsLoaded = useAppSelector((state) => state.outputs.loaded);
-  const glowingAgentCards = useAppSelector((state) => state.dashboardLayout.glowingAgentCards);
-  const glowingBrowserCards = useAppSelector((state) => state.dashboardLayout.glowingBrowserCards);
-  // sessions is the top-level dict; useMemo on its identity so sessionList
-  // is stable when sessions hasn't actually changed (RTK only swaps the dict
-  // ref when one of its values changes, so this is the right granularity).
-  const sessionList = useMemo(() => Object.values(sessions), [sessions]);
-
-  const contentBounds = useMemo(() => {
-    const allRects = [
-      ...Object.values(cards).map((c) => ({ x: c.x, y: c.y, w: c.width, h: c.height })),
-      ...Object.values(viewCards).map((c) => ({ x: c.x, y: c.y, w: c.width, h: c.height })),
-      ...Object.values(browserCards).map((c) => ({ x: c.x, y: c.y, w: c.width, h: c.height })),
-    ];
-    if (allRects.length === 0) return undefined;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const r of allRects) {
-      minX = Math.min(minX, r.x);
-      minY = Math.min(minY, r.y);
-      maxX = Math.max(maxX, r.x + r.w);
-      maxY = Math.max(maxY, r.y + r.h);
-    }
-    return { minX, minY, maxX, maxY };
-  }, [cards, viewCards, browserCards]);
-
-  const canvas = useCanvasControls(zoomSensitivity, contentBounds, isActive);
-  const selection = useDashboardSelection(
-    { panX: canvas.panX, panY: canvas.panY, zoom: canvas.zoom, viewportRef: canvas.viewportRef },
+  const controller = useDashboardController(dashboardId, isActive);
+  const {
+    c,
+    dashboardName,
+    canvas,
+    selection,
+    sessions,
+    sessionList,
     cards,
     viewCards,
     browserCards,
     notes,
-  );
-  const toolbarRef = useRef<HTMLDivElement>(null);
-
-  const [toolbarOpen, setToolbarOpen] = useState(false);
-  const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
-  const [highlightedCardId, setHighlightedCardId] = useState<string | null>(null);
-  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [autoFocusSessionId, setAutoFocusSessionId] = useState<string | null>(null);
-  const [pendingSelectSessionId, setPendingSelectSessionId] = useState<string | null>(null);
-  const [focusedCardId, setFocusedCardId] = useState<string | null>(null);
-  const [newAgentBounce, setNewAgentBounce] = useState(false);
+    outputs,
+    glowingAgentCards,
+    expandedSessionIds,
+    tethers,
+    highlightedCardId,
+    autoFocusSessionId,
+    focusedCardId,
+    pendingFocusNoteId,
+    multiDragDelta,
+    toolbarOpen,
+    searchPaletteOpen,
+    newAgentBounce,
+    toolbarRef,
+    spawnOriginsRef,
+    revealSpawnedRef,
+    measuredHeightsRef,
+    getCanvasState,
+    onViewportMouseDown,
+    onViewportMouseMove,
+    onViewportMouseUp,
+    onViewportDoubleClick,
+    onCardSelect,
+    onDragStart,
+    onDragMove,
+    onDragEnd,
+    onCardDoubleClick,
+    onBringToFront,
+    onBranch,
+    onMeasuredHeight,
+    onHighlightCard,
+    onNewAgent,
+    onToolbarCancel,
+    onToolbarSend,
+    onAddView,
+    onHistoryResume,
+    onAddBrowser,
+    onAddNote,
+    onNewAgentBounceEnd,
+    onFitToView,
+    onTidy,
+    onSearchPaletteClose,
+  } = controller;
   // Cleanup any leftover walkthrough localStorage from v1 — the v2 panel
   // ignores it but it would otherwise hang around forever.
   useEffect(() => {
@@ -194,27 +110,11 @@ const DashboardInner: React.FC<DashboardProps> = ({ dashboardId, isActive = true
     selection.selectCard(pendingSelectSessionId, 'agent', false);
   }, [pendingSelectSessionId, cards, selection]);
 
-  const spawnOriginsRef = useRef<Record<string, { x: number; y: number; type?: 'branch' }>>({});
-  const measuredHeightsRef = useRef<Record<string, number>>({});
-  const [measuredHeightsTick, setMeasuredHeightsTick] = useState(0);
-  const handleMeasuredHeight = useCallback((sessionId: string, height: number) => {
-    if (measuredHeightsRef.current[sessionId] !== height) {
-      measuredHeightsRef.current[sessionId] = height;
-      setMeasuredHeightsTick((t) => t + 1);
-    }
-  }, []);
-  const revealSpawnedRef = useRef(new Set<string>());
-  useEffect(() => {
-    revealSpawnedRef.current.forEach((id) => {
-      if (!cards[id]) revealSpawnedRef.current.delete(id);
-    });
-  }, [cards]);
   const hasFittedRef = useRef(false);
   const restoredExpandedRef = useRef(false);
   const canvasStateRef = useRef({ panX: canvas.panX, panY: canvas.panY, zoom: canvas.zoom });
   canvasStateRef.current = { panX: canvas.panX, panY: canvas.panY, zoom: canvas.zoom };
   // Stable getter — AgentCards read pan/zoom on demand during drag math.
-  const getCanvasState = useCallback(() => canvasStateRef.current, []);
   // Notify the currently dragging card (if any) that pan/zoom changed so
   // it can re-pin to the cursor. useEffect rather than render-body
   // dispatchEvent: side effects during render are a React anti-pattern
@@ -271,7 +171,6 @@ const DashboardInner: React.FC<DashboardProps> = ({ dashboardId, isActive = true
   }, [canvas.viewportRef, canvas.actions]);
 
   // ---- Multi-drag coordination ----
-  const [multiDragDelta, setMultiDragDelta] = useState<{ dx: number; dy: number } | null>(null);
   const [liveDragInfo, setLiveDragInfo] = useState<{ cardId: string; dx: number; dy: number } | null>(null);
   const activeDragCardRef = useRef<string | null>(null);
   const isMultiDragRef = useRef(false);
@@ -1541,199 +1440,9 @@ const DashboardInner: React.FC<DashboardProps> = ({ dashboardId, isActive = true
     }
   }, [isActive, glowingBrowserCards, browserCards, cards, dispatch]);
 
-  const TETHER_FADE_MS = 2500;
-
-  const tethers = useMemo(() => {
-    const ELBOW_RADIUS = 16;
-
-    function elbowPath(x1: number, y1: number, x2: number, y2: number): string {
-      const dx = x2 - x1;
-      const dy = y2 - y1;
-      const midX = x1 + dx / 2;
-      const r = (Math.abs(dy) < 1 || Math.abs(dx) < ELBOW_RADIUS * 2)
-        ? 0
-        : Math.min(ELBOW_RADIUS, Math.abs(dy) / 2, Math.abs(dx) / 4);
-      const sy = dy >= 0 ? 1 : -1;
-      const sx = dx >= 0 ? 1 : -1;
-
-      return [
-        `M ${x1},${y1}`,
-        `H ${midX - sx * r}`,
-        `Q ${midX},${y1} ${midX},${y1 + sy * r}`,
-        `V ${y2 - sy * r}`,
-        `Q ${midX},${y2} ${midX + sx * r},${y2}`,
-        `H ${x2}`,
-      ].join(' ');
-    }
-
-    const agentTethers = Object.entries(glowingAgentCards).map(([copyId, { sourceId, fading, sourceYRatio, label }]) => {
-      const src = cards[sourceId];
-      const dst = cards[copyId];
-      if (!src || !dst) return null;
-
-      let srcX = src.x, srcY = src.y;
-      let dstX = dst.x, dstY = dst.y;
-      if (liveDragInfo) {
-        if (liveDragInfo.cardId === sourceId) { srcX += liveDragInfo.dx; srcY += liveDragInfo.dy; }
-        if (liveDragInfo.cardId === copyId) { dstX += liveDragInfo.dx; dstY += liveDragInfo.dy; }
-      }
-
-      const srcMeasured = measuredHeightsRef.current[sourceId];
-      const srcH = srcMeasured ?? (expandedSessionIds.includes(sourceId)
-        ? Math.max(EXPANDED_CARD_MIN_H, src.height)
-        : src.height);
-      const dstMeasured = measuredHeightsRef.current[copyId];
-      const dstH = dstMeasured ?? (expandedSessionIds.includes(copyId)
-        ? Math.max(EXPANDED_CARD_MIN_H, dst.height)
-        : dst.height);
-
-      const x1 = srcX + src.width;
-      const y1 = srcY + srcH * 0.54;
-      const x2 = dstX;
-      const y2 = dstY + dstH * (expandedSessionIds.includes(copyId) ? 0.54 : 0.79);
-      const midX = x1 + (x2 - x1) / 2;
-      const labelX = midX + (x2 - midX) * 0.15;
-      const labelY = y2;
-
-      return {
-        key: copyId,
-        path: elbowPath(x1, y1, x2, y2),
-        labelX,
-        labelY,
-        label: label || '',
-        fading,
-      };
-    }).filter(Boolean) as Array<{ key: string; path: string; labelX: number; labelY: number; label: string; fading: boolean }>;
-
-    // Build browser tethers from TWO sources and merge:
-    // 1. glowingBrowserCards — the short-lived "flash" when a browser is first assigned
-    // 2. Active browser-agent sessions — persistent as long as the agent runs
-    //
-    // Source #2 is the fix for tethers disappearing when the parent session
-    // completes a turn (which clears glowingBrowserCards even though the
-    // browser agent is still working). Source #1 covers the initial moment
-    // before the browser-agent session is fully created. Together they
-    // ensure the arrow is always visible when it should be.
-
-    type Anchor = { x: number; y: number; side: 'left' | 'right' | 'top' | 'bottom' };
-
-    function browserTether(
-      browserId: string,
-      sourceId: string,
-      fading: boolean,
-      label: string,
-    ) {
-      const src = cards[sourceId];
-      const dst = browserCards[browserId];
-      if (!src || !dst) return null;
-
-      let srcX = src.x, srcY = src.y;
-      let dstX = dst.x, dstY = dst.y;
-      if (liveDragInfo) {
-        if (liveDragInfo.cardId === sourceId) { srcX += liveDragInfo.dx; srcY += liveDragInfo.dy; }
-        if (liveDragInfo.cardId === browserId) { dstX += liveDragInfo.dx; dstY += liveDragInfo.dy; }
-      }
-
-      const srcMeasured = measuredHeightsRef.current[sourceId];
-      const srcH = srcMeasured ?? (expandedSessionIds.includes(sourceId)
-        ? Math.max(EXPANDED_CARD_MIN_H, src.height)
-        : src.height);
-      const dstH = dst.height;
-
-      const srcCx = srcX + src.width / 2;
-      const dstCx = dstX + dst.width / 2;
-
-      const srcAnchors: Anchor[] = [
-        { x: srcX + src.width, y: srcY + srcH * 0.54, side: 'right' },
-        { x: srcX, y: srcY + srcH * 0.54, side: 'left' },
-        { x: srcCx, y: srcY, side: 'top' },
-        { x: srcCx, y: srcY + srcH, side: 'bottom' },
-      ];
-      const dstAnchors: Anchor[] = [
-        { x: dstX, y: dstY + dstH * 0.54, side: 'left' },
-        { x: dstX + dst.width, y: dstY + dstH * 0.54, side: 'right' },
-        { x: dstCx, y: dstY, side: 'top' },
-        { x: dstCx, y: dstY + dstH, side: 'bottom' },
-      ];
-
-      let bestSrc = srcAnchors[0], bestDst = dstAnchors[0];
-      let bestDist = Infinity;
-      for (const sa of srcAnchors) {
-        for (const da of dstAnchors) {
-          const d = Math.hypot(sa.x - da.x, sa.y - da.y);
-          if (d < bestDist) { bestDist = d; bestSrc = sa; bestDst = da; }
-        }
-      }
-
-      const x1 = bestSrc.x, y1 = bestSrc.y;
-      const x2 = bestDst.x, y2 = bestDst.y;
-
-      const isVertical = (bestSrc.side === 'top' || bestSrc.side === 'bottom')
-        && (bestDst.side === 'top' || bestDst.side === 'bottom');
-
-      let pathD: string;
-      if (isVertical) {
-        const dx = x2 - x1;
-        const dy = y2 - y1;
-        const midY = y1 + dy / 2;
-        const r = (Math.abs(dx) < 1 || Math.abs(dy) < ELBOW_RADIUS * 2)
-          ? 0
-          : Math.min(ELBOW_RADIUS, Math.abs(dx) / 2, Math.abs(dy) / 4);
-        const sx = dx >= 0 ? 1 : -1;
-        const sy = dy >= 0 ? 1 : -1;
-        pathD = [
-          `M ${x1},${y1}`,
-          `V ${midY - sy * r}`,
-          `Q ${x1},${midY} ${x1 + sx * r},${midY}`,
-          `H ${x2 - sx * r}`,
-          `Q ${x2},${midY} ${x2},${midY + sy * r}`,
-          `V ${y2}`,
-        ].join(' ');
-      } else {
-        pathD = elbowPath(x1, y1, x2, y2);
-      }
-
-      const midX = x1 + (x2 - x1) / 2;
-      const midY = y1 + (y2 - y1) / 2;
-      const labelX = isVertical ? midX : midX + (x2 - midX) * 0.15;
-      const labelY = isVertical ? midY + (y2 - midY) * 0.15 : y2;
-
-      return {
-        key: `browser-${browserId}`,
-        path: pathD,
-        labelX,
-        labelY,
-        label,
-        fading,
-      };
-    }
-
-    // Source 1: glow-based (covers the initial flash before browser-agent session exists)
-    const glowTethers = new Map<string, ReturnType<typeof browserTether>>();
-    for (const [browserId, { sourceId, fading, label }] of Object.entries(glowingBrowserCards)) {
-      const t = browserTether(browserId, sourceId, fading, label || '');
-      if (t) glowTethers.set(browserId, t);
-    }
-
-    // Source 2: active browser-agent sessions (persistent — survives parent turn completion)
-    for (const s of sessionList) {
-      if (s.mode !== 'browser-agent') continue;
-      if (s.status !== 'running' && s.status !== 'waiting_approval') continue;
-      if (!s.browser_id || !s.parent_session_id) continue;
-      if (glowTethers.has(s.browser_id)) continue; // glow already covers this one
-      const t = browserTether(s.browser_id, s.parent_session_id, false, '');
-      if (t) glowTethers.set(s.browser_id, t);
-    }
-
-    const browserTethers = Array.from(glowTethers.values()).filter(Boolean) as Array<{ key: string; path: string; labelX: number; labelY: number; label: string; fading: boolean }>;
-
-    return [...agentTethers, ...browserTethers];
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [glowingAgentCards, glowingBrowserCards, cards, browserCards, expandedSessionIds, liveDragInfo, measuredHeightsTick, sessionList]);
 
   const dotSize = Math.max(1, 1.5 * canvas.zoom);
   const dotSpacing = 24 * canvas.zoom;
-
   return (
     <>
     <DashboardSelectionOverlay />
