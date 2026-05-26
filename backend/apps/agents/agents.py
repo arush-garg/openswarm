@@ -103,8 +103,6 @@ async def create_agent(body: dict):
     )
 
     session = await agent_manager.launch_agent(config)
-    session.parent_session_id = parent.id
-    session.is_persistent = is_persistent
 
     await agent_manager.send_message(
         session.id,
