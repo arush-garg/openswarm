@@ -31,6 +31,8 @@ import {
   switchBranch,
   duplicateSession,
   setActiveSession,
+  updateSessionName,
+  persistSessionName,
   updateSessionModel,
   persistSessionModel,
   updateSessionMode,
@@ -52,6 +54,7 @@ import ToolGroupBubble, { RenderItem, ToolGroup, isToolGroup, isToolPair } from 
 import ApprovalBar, { BatchApprovalBar } from './ApprovalBar';
 import ChatInput, { ChatInputHandle } from './ChatInput';
 import ContextDrawer from './ContextDrawer';
+import InlineEditableSessionName from '@/app/components/InlineEditableSessionName';
 import { ErrorSlime } from '@/app/components/ErrorSlime';
 import { ContextPath } from '@/app/components/DirectoryBrowser';
 import { setGlowingBrowserCards, fadeGlowingBrowserCards, clearGlowingBrowserCards } from '@/shared/state/dashboardLayoutSlice';
@@ -260,6 +263,17 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
   const [activateError, setActivateError] = useState<string | null>(null);
   const [mode, setMode] = useState('agent');
   const [model, setModel] = useState('sonnet');
+
+  const renameSession = useCallback(async (nextName: string) => {
+    if (!id || !session) return;
+    const previousName = session.name;
+    dispatch(updateSessionName({ sessionId: id, name: nextName }));
+    try {
+      await dispatch(persistSessionName({ sessionId: id, name: nextName })).unwrap();
+    } catch {
+      dispatch(updateSessionName({ sessionId: id, name: previousName }));
+    }
+  }, [dispatch, id, session]);
 
   const wsRef = useRef<ReturnType<typeof createSessionWs> | null>(null);
   const initialContextApplied = useRef(false);
@@ -948,7 +962,11 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
           >
             <Box sx={{ flex: 1, minWidth: 0 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <Typography noWrap sx={{ color: c.text.primary, fontWeight: 600 }}>{session.name}</Typography>
+                <InlineEditableSessionName
+                  value={session.name}
+                  onCommit={renameSession}
+                  textSx={{ color: c.text.primary, fontWeight: 600, fontSize: '0.95rem' }}
+                />
                 {!isDraft && statusStyle && (
                   <Chip
                     label={session.status.replace('_', ' ')}

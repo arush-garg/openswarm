@@ -17,7 +17,8 @@ import {
   handleApproval,
   collapseSession,
   closeSession,
-  
+  updateSessionName,
+  persistSessionName,
 } from '@/shared/state/agentsSlice';
 import {
   setCardPosition,
