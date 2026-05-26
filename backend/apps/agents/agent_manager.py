@@ -1190,6 +1190,24 @@ class AgentManager:
                 "type": "stdio",
             }
 
+            # Simple list-agents MCP server: exposes ListAgents to models so
+            # they can discover current session ids and names for the dashboard.
+            list_agents_server_path = os.path.join(
+                os.path.dirname(__file__), "list_agents_mcp_server.py"
+            )
+            from backend.auth import get_auth_token as _get_auth_token4
+            mcp_servers["openswarm-list-agents"] = {
+                "command": sys.executable,
+                "args": [list_agents_server_path],
+                "env": {
+                    "OPENSWARM_PORT": os.environ.get("OPENSWARM_PORT", "8324"),
+                    "OPENSWARM_AUTH_TOKEN": _get_auth_token4(),
+                    "OPENSWARM_PARENT_SESSION_ID": session.id,
+                    "OPENSWARM_DASHBOARD_ID": session.dashboard_id or "",
+                },
+                "type": "stdio",
+            }
+
 
             # The CLI's built-in WebSearch/WebFetch wraps Anthropic's
             # web_search_20250305. For non-Claude primaries the CLI
@@ -1315,6 +1333,15 @@ class AgentManager:
                                 effective_allowed.append(f"mcp__openswarm-invoke-agent__{it}")
                             elif policy == "deny":
                                 effective_disallowed.append(f"mcp__openswarm-invoke-agent__{it}")
+                        continue
+
+                    if name == "openswarm-list-agents":
+                        # Expose ListAgents under the MCP prefix when allowed.
+                        policy = _builtin_perms.get("ListAgents", "always_allow")
+                        if policy == "always_allow":
+                            effective_allowed.append(f"mcp__openswarm-list-agents__ListAgents")
+                        elif policy == "deny":
+                            effective_disallowed.append(f"mcp__openswarm-list-agents__ListAgents")
                         continue
 
                     if name == "openswarm-web":
