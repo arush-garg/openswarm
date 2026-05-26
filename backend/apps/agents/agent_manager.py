@@ -3726,11 +3726,16 @@ class AgentManager:
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
-        allowed = {"system_prompt", "name", "thinking_level"}
+        allowed = {"system_prompt", "name", "thinking_level", "model"}
         for key, value in fields.items():
             if key in allowed:
                 # Defend against bad thinking_level values
                 if key == "thinking_level" and value not in ("off", "low", "medium", "high", "auto"):
+                    continue
+                # Model changes should update session.model and refresh context window
+                if key == "model" and value and value != session.model:
+                    session.model = value
+                    _apply_context_window(session)
                     continue
                 setattr(session, key, value)
 
