@@ -13,6 +13,8 @@ class AgentConfig(BaseModel):
     max_turns: Optional[int] = None
     target_directory: Optional[str] = None
     dashboard_id: Optional[str] = None
+    parent_session_id: Optional[str] = None
+    is_persistent: bool = False
 
 class ApprovalRequest(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
