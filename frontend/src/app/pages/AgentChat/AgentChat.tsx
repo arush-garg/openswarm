@@ -27,6 +27,7 @@ import {
   stopAgent,
   handleApproval,
   editMessage,
+  deleteMessage,
   switchBranch,
   duplicateSession,
   setActiveSession,
@@ -541,6 +542,19 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
   const handleCancelEdit = useCallback(() => {
     setEditingMessageId(null);
   }, []);
+
+  const handleDeleteMessage = useCallback(
+    (message: AgentMessage) => {
+      if (!id) return;
+      const hasBranches = Object.values(session?.branches || {}).some(
+        (branch) => branch.fork_point_message_id === message.id
+      );
+      if (hasBranches) return;
+      setEditingMessageId((cur) => (cur === message.id ? null : cur));
+      dispatch(deleteMessage({ sessionId: id, messageId: message.id }));
+    },
+    [id, dispatch, session?.branches]
+  );
 
   const activeBranchMessages = useMemo(() => {
     if (!session) return [];
@@ -1282,6 +1296,7 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
                       role={msg.role as 'user' | 'assistant'}
                       onCopy={() => navigator.clipboard.writeText(rawText)}
                       onEdit={msg.role === 'user' ? () => setEditingMessageId(msg.id) : undefined}
+                        onDelete={hasBranches ? undefined : () => handleDeleteMessage(msg)}
                       onRegenerate={msg.role === 'assistant' ? () => handleRegenerate(msg) : undefined}
                       onBranch={msg.role === 'assistant' ? () => handleBranchChat(msg.id) : undefined}
                       branchNav={

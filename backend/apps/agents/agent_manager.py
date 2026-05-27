@@ -54,6 +54,7 @@ from backend.apps.agents.manager.session.session_store import (
     _load_all_session_data,
     _load_session_data,
     _save_session,
+    _mark_session_restored,
     build_search_text,
 )
 from backend.apps.agents.manager.session.workspace_git import _detect_git_identity, _ensure_cwd_git_repo
@@ -116,6 +117,19 @@ def _apply_context_window(session, settings=None) -> None:
         logger.debug("context_window lookup failed; keeping existing value", exc_info=True)
 
 
+def _set_turn_token_totals(session, baseline_input: int, baseline_output: int, turn_input: int, turn_output: int) -> None:
+    """Write cumulative token totals for the current turn.
+
+    session.tokens is treated as a running session total everywhere the UI
+    and compaction logic read it, so each turn must add its usage on top of
+    the baseline captured at turn start.
+    """
+    if not isinstance(getattr(session, "tokens", None), dict):
+        session.tokens = {}
+    session.tokens["input"] = baseline_input + max(0, turn_input)
+    session.tokens["output"] = baseline_output + max(0, turn_output)
+
+
 def _load_dashboard_session_ids() -> set[str]:
     session_ids: set[str] = set()
     if not os.path.exists(DASHBOARDS_DIR):
@@ -131,7 +145,17 @@ def _load_dashboard_session_ids() -> set[str]:
         layout = dashboard.get("layout") or {}
         cards = layout.get("cards") or {}
         if isinstance(cards, dict):
-            session_ids.update(cards.keys())
+            for k, v in cards.items():
+                session_ids.add(k)
+                if isinstance(v, dict) and "session_id" in v:
+                    session_ids.add(v["session_id"])
+        
+        # Check both layout.expanded_session_ids and root expanded_session_ids
+        expanded = layout.get("expanded_session_ids") or dashboard.get("expanded_session_ids") or []
+        if isinstance(expanded, list):
+            for eid in expanded:
+                if isinstance(eid, str):
+                    session_ids.add(eid)
     return session_ids
 
 
@@ -561,6 +585,12 @@ class AgentManager:
         )
         _apply_context_window(session, global_settings)
         self.sessions[session_id] = session
+
+        # Persist immediately so it survives a crash before the first turn
+        try:
+            _save_session(session_id, session.model_dump(mode="json"))
+        except Exception as e:
+            logger.warning(f"Failed to persist newly launched session {session_id}: {e}")
 
         from backend.apps.service.version import APP_VERSION
 
@@ -1305,6 +1335,10 @@ class AgentManager:
                 )
                 _apply_context_window(sub_session)
                 self.sessions[sub_session_id] = sub_session
+                try:
+                    _save_session(sub_session_id, sub_session.model_dump(mode="json"))
+                except Exception as e:
+                    logger.warning(f"Failed to persist sub-session {sub_session_id}: {e}")
                 await ws_manager.broadcast_global("agent:status", {
                     "session_id": sub_session_id,
                     "status": sub_session.status,
@@ -2931,9 +2965,13 @@ class AgentManager:
                                 _pre_total_in = _pre_in + _pre_create + _pre_read
                                 _pre_out = int(_pre_usage.get("output_tokens", 0) or 0)
                                 if _pre_total_in > 0:
-                                    session.tokens["input"] = _pre_total_in
-                                if _pre_out > 0:
-                                    session.tokens["output"] = _pre_out
+                                    _set_turn_token_totals(
+                                        session,
+                                        _turn_baseline_session_in,
+                                        _turn_baseline_session_out,
+                                        _pre_total_in,
+                                        _pre_out,
+                                    )
                         except Exception:
                             pass
 
@@ -2998,8 +3036,13 @@ class AgentManager:
                             cache_create = usage.get("cache_creation_input_tokens", 0) or 0
                             cache_read = usage.get("cache_read_input_tokens", 0) or 0
                             total_input = inp + cache_create + cache_read
-                            session.tokens["input"] = total_input
-                            session.tokens["output"] = out
+                            _set_turn_token_totals(
+                                session,
+                                _turn_baseline_session_in,
+                                _turn_baseline_session_out,
+                                total_input,
+                                out,
+                            )
 
                         cost = getattr(message, "total_cost_usd", None)
                         if cost is not None:
@@ -3417,7 +3460,7 @@ class AgentManager:
                     asyncio.create_task(self._maybe_export_session_to_dreaming_corpus(session_id, snapshot))
                 except Exception:
                     logger.exception("Failed queueing dreaming export for %s", session_id)
-                if task_id and getattr(session, "is_worker", False):
+                if getattr(session, "is_worker", False):
                     try:
                         await self.schedule_next_worker_task(session_id)
                     except Exception:
@@ -3583,6 +3626,10 @@ class AgentManager:
                 _apply_context_window(session)
                 session.closed_at = None
                 self.sessions[session_id] = session
+                try:
+                    _save_session(session_id, session.model_dump(mode="json"))
+                except Exception as e:
+                    pass
             else:
                 raise ValueError(f"Session {session_id} not found")
         
@@ -3634,6 +3681,10 @@ class AgentManager:
             client_message_id=client_message_id,
         )
         session.messages.append(user_msg)
+        try:
+            _save_session(session_id, session.model_dump(mode="json"))
+        except Exception:
+            pass
         await ws_manager.send_to_session(session_id, "agent:message", {
             "session_id": session_id,
             "message": user_msg.model_dump(mode="json"),
@@ -3781,6 +3832,45 @@ class AgentManager:
             "session_id": session_id,
             "message": edited_msg.model_dump(mode="json"),
         })
+
+    async def delete_message(self, session_id: str, message_id: str):
+        """Delete a message from a session's history.
+
+        Messages that are used as branch fork points are kept intact so
+        branch navigation and replay stay consistent.
+        """
+        session = self.sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        if any(branch.fork_point_message_id == message_id for branch in session.branches.values()):
+            raise ValueError("Message is referenced by one or more branches")
+
+        existing = self.tasks.get(session_id)
+        if existing and not existing.done():
+            existing.cancel()
+            try:
+                await existing
+            except asyncio.CancelledError:
+                pass
+
+        before_count = len(session.messages)
+        session.messages = [msg for msg in session.messages if msg.id != message_id]
+        if len(session.messages) == before_count:
+            raise ValueError(f"Message {message_id} not found")
+
+        try:
+            _save_session(session_id, session.model_dump(mode="json"))
+        except Exception as e:
+            logger.warning(f"Failed to snapshot session {session_id} after message delete: {e}")
+
+        await ws_manager.send_to_session(session_id, "agent:status", {
+            "session_id": session_id,
+            "status": session.status,
+            "session": session.model_dump(mode="json"),
+        })
+
+        return session
         await ws_manager.send_to_session(session_id, "agent:branch_created", {
             "session_id": session_id,
             "branch": new_branch.model_dump(mode="json"),
@@ -4377,7 +4467,14 @@ class AgentManager:
             session.pending_approvals = []
             _apply_context_window(session)
             self.sessions[session.id] = session
-            _delete_session_file(sid)
+            # Do not permanently delete the disk copy immediately. Mark it
+            # as restored by renaming to a '.restored' suffix so that a crash
+            # between rehydration and the next successful save cannot lose
+            # the only durable copy of the session.
+            try:
+                _mark_session_restored(sid)
+            except Exception:
+                logger.exception("Failed to mark restored session file %s", sid)
             logger.info(f"Restored session {session.id}")
 
     async def duplicate_session(self, session_id: str, dashboard_id: str | None = None, up_to_message_id: str | None = None) -> AgentSession:
@@ -4448,6 +4545,12 @@ class AgentManager:
         _apply_context_window(new_session)
 
         self.sessions[new_session.id] = new_session
+
+        # Persist immediately so duplicated sessions survive a crash
+        try:
+            _save_session(new_session.id, new_session.model_dump(mode="json"))
+        except Exception as e:
+            logger.warning(f"Failed to persist duplicated session {new_session.id}: {e}")
 
         await ws_manager.send_to_session(new_session.id, "agent:status", {
             "session_id": new_session.id,
@@ -4534,6 +4637,11 @@ class AgentManager:
         _apply_context_window(fork)
 
         self.sessions[fork.id] = fork
+
+        try:
+            _save_session(fork.id, fork.model_dump(mode="json"))
+        except Exception as e:
+            logger.warning(f"Failed to persist invoked session {fork.id}: {e}")
 
         await ws_manager.broadcast_global("agent:status", {
             "session_id": fork.id,

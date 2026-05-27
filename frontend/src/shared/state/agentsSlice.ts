@@ -263,6 +263,21 @@ export const editMessage = createAsyncThunk(
   }
 );
 
+export const deleteMessage = createAsyncThunk(
+  'agents/deleteMessage',
+  async ({ sessionId, messageId }: { sessionId: string; messageId: string }) => {
+    const res = await fetch(`${AGENTS_API}/sessions/${sessionId}/messages/${messageId}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({} as any));
+      throw new Error(body?.detail || `delete failed: ${res.status}`);
+    }
+    const data = await res.json();
+    return data.session as AgentSession;
+  }
+);
+
 export const switchBranch = createAsyncThunk(
   'agents/switchBranch',
   async ({ sessionId, branchId }: { sessionId: string; branchId: string }) => {
@@ -1147,6 +1162,13 @@ const agentsSlice = createSlice({
         if (session && session.status === 'running') {
           session.status = 'completed';
         }
+      })
+      .addCase(deleteMessage.fulfilled, (state, action) => {
+        const session = action.payload;
+        state.sessions[session.id] = { ...session, tool_group_meta: session.tool_group_meta ?? {} };
+      })
+      .addCase(deleteMessage.rejected, (_state, action) => {
+        console.error('Delete message failed:', action.error.message);
       })
       .addCase(stopAgent.fulfilled, (state, action) => {
         const session = state.sessions[action.payload];

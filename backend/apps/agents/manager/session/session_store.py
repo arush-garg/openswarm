@@ -1,4 +1,5 @@
 import os
+import shutil
 
 from backend.apps.agents.core.models import AgentSession
 from backend.config.json_store import read_json_or_none, atomic_write_json
@@ -15,6 +16,14 @@ def _save_session(session_id: str, doc_data: dict):
     sessions_dir = _sessions_dir()
     os.makedirs(sessions_dir, exist_ok=True)
     atomic_write_json(os.path.join(sessions_dir, f"{session_id}.json"), doc_data)
+    # If a restored marker exists from startup rehydration, remove it now
+    restored_path = os.path.join(sessions_dir, f"{session_id}.json.restored")
+    try:
+        if os.path.exists(restored_path):
+            os.remove(restored_path)
+    except Exception:
+        # Best-effort cleanup; don't crash the saver for ancillary cleanup failures
+        pass
 
 
 def _load_session_data(session_id: str) -> dict | None:
@@ -27,16 +36,61 @@ def _delete_session_file(session_id: str):
         os.remove(path)
 
 
+def _mark_session_restored(session_id: str):
+    """Atomically rename the on-disk session file to a '.restored' suffix.
+
+    This preserves the original file on-disk during rehydration so a crash
+    between restore and the next successful save doesn't permanently lose
+    the session data. The ordinary save path clears the restored marker.
+    """
+    src = os.path.join(_sessions_dir(), f"{session_id}.json")
+    dst = src + ".restored"
+    try:
+        if os.path.exists(src):
+            # Copy the original file to a '.restored' backup instead of
+            # renaming it. Keeping the original .json ensures the loader
+            # continues to find sessions on subsequent restarts.
+            shutil.copy2(src, dst)
+    except Exception:
+        # Best-effort; do not raise during startup rehydration
+        pass
+
+
+def _clear_restored(session_id: str):
+    """Remove a leftover '.restored' marker for a session (best-effort)."""
+    path = os.path.join(_sessions_dir(), f"{session_id}.json.restored")
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
 def _load_all_session_data() -> list[tuple[str, dict]]:
     results = []
     sessions_dir = _sessions_dir()
     if not os.path.exists(sessions_dir):
         return results
+    seen: set[str] = set()
+    # Prefer .json files; if missing, accept .json.restored backups
     for fname in os.listdir(sessions_dir):
+        path = os.path.join(sessions_dir, fname)
         if fname.endswith(".json"):
-            data = read_json_or_none(os.path.join(sessions_dir, fname))
+            data = read_json_or_none(path)
             if data is not None:
-                results.append((fname[:-5], data))
+                sid = fname[:-5]
+                results.append((sid, data))
+                seen.add(sid)
+    for fname in os.listdir(sessions_dir):
+        if not fname.endswith(".json.restored"):
+            continue
+        sid = fname[:-len(".json.restored")]
+        if sid in seen:
+            continue
+        data = read_json_or_none(os.path.join(sessions_dir, fname))
+        if data is not None:
+            results.append((sid, data))
+            seen.add(sid)
     return results
 
 

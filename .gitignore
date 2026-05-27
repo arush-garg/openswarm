@@ -7,6 +7,7 @@
 backend/data/**
 !backend/data/outputs/
 !backend/data/outputs/*.json
+helper_scripts/
 
 # Electron build artifacts
 electron/dist/

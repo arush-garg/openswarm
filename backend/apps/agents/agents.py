@@ -162,6 +162,16 @@ async def edit_message(session_id: str, body: dict):
     await agent_manager.edit_message(session_id, message_id, new_content)
     return {"ok": True}
 
+@agents.router.delete("/sessions/{session_id}/messages/{message_id}")
+async def delete_message(session_id: str, message_id: str):
+    try:
+        session = await agent_manager.delete_message(session_id, message_id)
+    except ValueError as e:
+        detail = str(e)
+        status_code = 409 if "referenced by one or more branches" in detail else 404
+        raise HTTPException(status_code=status_code, detail=detail)
+    return {"ok": True, "session": session.model_dump(mode="json")}
+
 @agents.router.post("/sessions/{session_id}/switch_branch")
 async def switch_branch(session_id: str, body: dict):
     branch_id = body.get("branch_id", "")

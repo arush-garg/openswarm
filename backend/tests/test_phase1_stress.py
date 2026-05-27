@@ -194,6 +194,20 @@ def test_reconcile_idempotent():
         assert mtime_after_first == mtime_after_second, "reconcile must be idempotent"
 
 
+def test_turn_token_totals_are_cumulative():
+    """Each turn must add to the running session totals, not overwrite them."""
+    from backend.apps.agents.agent_manager import _set_turn_token_totals
+
+    class DummySession:
+        tokens = {"input": 1200, "output": 400}
+
+    session = DummySession()
+    _set_turn_token_totals(session, baseline_input=1200, baseline_output=400, turn_input=300, turn_output=40)
+
+    assert session.tokens["input"] == 1500
+    assert session.tokens["output"] == 440
+
+
 def test_restore_all_sessions_loads_closed_dashboards_and_stops_running_ones():
     """Startup restore must keep closed dashboard sessions in memory so the canvas can render them."""
     from backend.apps.agents.agent_manager import AgentManager

@@ -7,6 +7,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import CheckIcon from '@mui/icons-material/Check';
 import EditIcon from '@mui/icons-material/Edit';
 import BookmarkBorderIcon from '@mui/icons-material/BookmarkBorder';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import ReplayIcon from '@mui/icons-material/Replay';
 import CallSplitIcon from '@mui/icons-material/CallSplit';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
@@ -24,6 +25,7 @@ interface Props {
   role: 'user' | 'assistant';
   onCopy: () => void;
   onEdit?: () => void;
+  onDelete?: () => void;
   onRegenerate?: () => void;
   onBranch?: () => void;
   branchNav?: BranchNavProps;
@@ -40,6 +42,7 @@ const MessageActionBar: React.FC<Props> = ({
   role,
   onCopy,
   onEdit,
+  onDelete,
   onRegenerate,
   onBranch,
   branchNav,
@@ -91,6 +94,13 @@ const MessageActionBar: React.FC<Props> = ({
               </IconButton>
             </Tooltip>
           )}
+          {onDelete && (
+            <Tooltip title="Delete from history" arrow>
+              <IconButton size="small" onClick={onDelete} sx={btnSx(c)}>
+                <DeleteOutlineIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
+          )}
           {branchNav && branchNav.totalBranches > 1 && (
             <Box sx={{ display: 'inline-flex', alignItems: 'center', ml: 0.25 }}>
               <IconButton
@@ -130,6 +140,13 @@ const MessageActionBar: React.FC<Props> = ({
               {copied ? <CheckIcon sx={{ fontSize: 16 }} /> : <ContentCopyIcon sx={{ fontSize: 16 }} />}
             </IconButton>
           </Tooltip>
+          {onDelete && (
+            <Tooltip title="Delete from history" arrow>
+              <IconButton size="small" onClick={onDelete} sx={btnSx(c)}>
+                <DeleteOutlineIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Tooltip>
+          )}
           {onRegenerate && (
             <Tooltip title="Regenerate" arrow>
               <IconButton size="small" onClick={onRegenerate} sx={btnSx(c)}>
@@ -155,6 +172,7 @@ export default React.memo(MessageActionBar, (prev, next) => (
   prev.role === next.role
   && !!prev.onCopy === !!next.onCopy
   && !!prev.onEdit === !!next.onEdit
+  && !!prev.onDelete === !!next.onDelete
   && !!prev.onRegenerate === !!next.onRegenerate
   && !!prev.onBranch === !!next.onBranch
   && prev.branchNav?.currentIndex === next.branchNav?.currentIndex

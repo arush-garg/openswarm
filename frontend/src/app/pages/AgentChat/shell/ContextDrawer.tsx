@@ -53,7 +53,7 @@ export default function ContextDrawer() {
               {Math.round(ctxPct * 100)}%
             </Typography>
             <Typography variant="caption" sx={{ color: c.text.tertiary }}>
-              {(session.tokens?.input || 0).toLocaleString()} / 200K tokens
+              {(session.tokens?.input || 0).toLocaleString()} / {(session.context_window || 200_000).toLocaleString()} tokens
             </Typography>
           </Box>
           <Box sx={{ p: 1.5, borderRadius: 1, border: `1px solid ${c.border.medium}` }}>
