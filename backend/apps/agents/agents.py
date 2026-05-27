@@ -740,7 +740,10 @@ async def list_models():
                 result[f"OpenRouter · {pretty}"] = entries
 
     # Custom OpenAI-compatible providers (Ollama Cloud, Together, etc); addressed via custom/<slug>/<model_id>.
-    from backend.apps.agents.providers.registry import _custom_provider_slug_for_lookup
+    from backend.apps.agents.providers.registry import (
+        _custom_provider_slug_for_lookup,
+        get_custom_provider_model_context_window,
+    )
     for cp in (getattr(settings, "custom_providers", None) or []):
         cp_name = (getattr(cp, "name", "") or "").strip()
         cp_base_url = (getattr(cp, "base_url", "") or "").strip()
@@ -754,9 +757,7 @@ async def list_models():
             if not bare:
                 continue
             label = (m.get("label") or bare).strip() or bare
-            ctx = m.get("context_window")
-            if not isinstance(ctx, int) or ctx <= 0:
-                ctx = 128_000
+            ctx = get_custom_provider_model_context_window(cp_name, cp_base_url, m)
             entries.append({
                 "value": f"custom/{slug}/{bare}",
                 "label": label,

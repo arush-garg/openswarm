@@ -191,23 +191,37 @@ def _build_openclaw_command(openclaw_path: str, args: list[str]) -> list[str]:
 
 
 def run_openclaw_dreaming_cycle(openclaw_path: str) -> tuple[bool, str]:
-    """Trigger OpenClaw memory promotion/rem reflection in a single cycle."""
+    """Trigger the full OpenClaw dreaming cycle (Extraction, Narrative, Promotion)."""
     try:
+        corpus_dir = _session_corpus_dir()
+        
+        # 1. Extraction & Narrative (REM Phase)
+        backfill_cmd = _build_openclaw_command(openclaw_path, ["memory", "rem-backfill", "--path", corpus_dir, "--stage-short-term"])
+        backfill = subprocess.run(backfill_cmd, capture_output=True, text=True, timeout=300)
+        if backfill.returncode != 0:
+            stderr = (backfill.stderr or "").strip()
+            return False, f"OpenClaw dreaming failed during analysis (rem-backfill): {stderr or 'unknown error'}"
+            
+        # 2. Promotion to Long-term Memory (Deep Phase)
         promote_cmd = _build_openclaw_command(openclaw_path, ["memory", "promote", "--apply"])
         promote = subprocess.run(promote_cmd, capture_output=True, text=True, timeout=180)
         if promote.returncode != 0:
             stderr = (promote.stderr or "").strip()
-            return False, f"OpenClaw dreaming failed during promote: {stderr or 'unknown error'}"
+            return False, f"OpenClaw dreaming failed during promotion: {stderr or 'unknown error'}"
 
-        rem_cmd = _build_openclaw_command(openclaw_path, ["memory", "rem-harness"])
-        rem = subprocess.run(rem_cmd, capture_output=True, text=True, timeout=180)
-        if rem.returncode != 0:
-            stderr = (rem.stderr or "").strip()
-            return False, f"OpenClaw dreaming promote succeeded but rem-harness failed: {stderr or 'unknown error'}"
-
+        backfill_out = (backfill.stdout or "").strip()
         promote_out = (promote.stdout or "").strip()
-        rem_out = (rem.stdout or "").strip()
-        summary = " | ".join(part for part in [promote_out, rem_out] if part)
+        
+        # Extract summary stats from stdout
+        summary_parts = []
+        for line in backfill_out.split('\n'):
+            if "writtenEntries" in line or "stagedShortTermEntries" in line:
+                summary_parts.append(line.strip())
+        for line in promote_out.split('\n'):
+            if "Promoted" in line or "No short-term recall" in line:
+                summary_parts.append(line.strip())
+                
+        summary = " | ".join(summary_parts)
         if not summary:
             summary = "OpenClaw dreaming cycle completed."
         return True, summary

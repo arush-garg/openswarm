@@ -2280,6 +2280,26 @@ def test_custom_provider_context_window_falls_back_to_default():
     assert cw == 128_000
 
 
+def test_custom_provider_context_window_autodetects_ollama_when_missing():
+    """Ollama custom providers should read their native context length from model metadata."""
+    from backend.apps.agents.providers.registry import get_context_window
+    from backend.apps.settings.models import AppSettings, CustomProvider
+
+    s = AppSettings(custom_providers=[
+        CustomProvider(
+            name="Ollama",
+            base_url="http://localhost:11434/v1",
+            api_key="",
+            models=[{"value": "llama3.1:8b", "label": "llama3.1:8b"}],
+        ),
+    ])
+
+    with patch("backend.apps.agents.providers.registry._detect_ollama_context_window", return_value=64_000):
+        cw = get_context_window("Ollama", "custom/ollama/llama3.1:8b", s)
+
+    assert cw == 64_000
+
+
 def test_custom_provider_resolve_aux_model_unaffected():
     """resolve_aux_model is the one-shot LLM call path. Custom providers
     are NOT in its decision tree, Haiku/9Router/OR fallbacks should still

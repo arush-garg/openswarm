@@ -194,6 +194,75 @@ def test_reconcile_idempotent():
         assert mtime_after_first == mtime_after_second, "reconcile must be idempotent"
 
 
+def test_restore_all_sessions_loads_closed_dashboards_and_stops_running_ones():
+    """Startup restore must keep closed dashboard sessions in memory so the canvas can render them."""
+    from backend.apps.agents.agent_manager import AgentManager
+    from backend.apps.agents import agent_manager as am_mod
+
+    with tempfile.TemporaryDirectory() as td:
+        closed_id = "closed-dashboard"
+        deleted_id = "deleted-old"
+        running_id = "stale-running"
+        common = {
+            "name": "Agent",
+            "provider": "anthropic",
+            "model": "sonnet",
+            "mode": "agent",
+            "created_at": "2026-05-26T00:00:00",
+            "allowed_tools": [],
+            "messages": [],
+            "pending_approvals": [],
+            "branches": {"main": {"id": "main"}},
+            "active_branch_id": "main",
+            "tool_group_meta": {},
+            "tokens": {"input": 0, "output": 0},
+        }
+
+        dashboards_dir = os.path.join(td, "dashboards")
+        os.makedirs(dashboards_dir, exist_ok=True)
+        with open(os.path.join(dashboards_dir, "dash-123.json"), "w") as f:
+            json.dump({
+                "id": "dash-123",
+                "layout": {"cards": {closed_id: {"session_id": closed_id}}},
+            }, f)
+
+        with open(os.path.join(td, f"{closed_id}.json"), "w") as f:
+            json.dump({
+                **common,
+                "id": closed_id,
+                "status": "stopped",
+                "closed_at": "2026-05-26T01:00:00",
+                "dashboard_id": "dash-123",
+            }, f)
+        with open(os.path.join(td, f"{deleted_id}.json"), "w") as f:
+            json.dump({
+                **common,
+                "id": deleted_id,
+                "status": "stopped",
+                "closed_at": "2026-05-26T01:00:00",
+                "dashboard_id": "dash-123",
+            }, f)
+        with open(os.path.join(td, f"{running_id}.json"), "w") as f:
+            json.dump({
+                **common,
+                "id": running_id,
+                "status": "running",
+                "closed_at": None,
+                "dashboard_id": "dash-123",
+            }, f)
+
+        with patch.object(am_mod, "SESSIONS_DIR", td):
+            with patch.object(am_mod, "DASHBOARDS_DIR", dashboards_dir):
+                mgr = AgentManager()
+                asyncio.run(mgr.restore_all_sessions())
+
+        assert closed_id in mgr.sessions, "closed dashboard sessions should be restored"
+        assert mgr.sessions[closed_id].closed_at is not None
+        assert deleted_id not in mgr.sessions, "deleted closed sessions should stay out of the live dashboard"
+        assert running_id in mgr.sessions, "stale running sessions should still be restored"
+        assert mgr.sessions[running_id].status == "stopped"
+
+
 
 # ---------------------------------------------------------------------------
 # Group 6, Notes layout serialization

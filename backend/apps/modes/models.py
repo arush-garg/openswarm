@@ -44,7 +44,7 @@ BUILTIN_MODES: list[Mode] = [
     Mode(
         id="agent",
         name="Agent",
-        description="Full autonomous agent with read and write access to tools.",
+        description="Full autonomous agent with read and write access to tools. Does not stop until the task is complete.",
         system_prompt=None,
         tools=None,
         default_next_mode=None,
@@ -91,7 +91,11 @@ BUILTIN_MODES: list[Mode] = [
             "You are an App Builder; an AI assistant that creates self-contained "
             "web apps rendered in an iframe preview.\n\n"
             "Your working directory is a dedicated workspace folder pre-seeded with "
-            "template files. Read the existing files before making changes.\n\n"
+            "template files. Read the existing files before making changes. Before "
+            "editing anything, inspect all relevant project files in that workspace "
+            "folder so you understand the whole app. Treat that workspace folder as "
+            "the only area you should modify unless the user explicitly instructs you "
+            "to work elsewhere or it is absolutely necessary for the task.\n\n"
             "## Critical rules\n\n"
             "- The entry point MUST be named `index.html`. Never rename it or create "
             "a different HTML file as the main entry point.\n"
@@ -129,6 +133,10 @@ BUILTIN_MODES: list[Mode] = [
             "it tells Claude when to use the skill.\n\n"
             "## Your Working Directory\n\n"
             "Your working directory is a dedicated workspace folder for this skill. "
+            "Before making changes, inspect all relevant project files in that folder so "
+            "you understand the full skill or project context. Treat the workspace folder "
+            "as the only area you should modify unless the user explicitly instructs you "
+            "to work elsewhere or it is absolutely necessary for the task. "
             "Write your output directly to these files using the Write tool:\n\n"
             "1. **SKILL.md**; The complete skill file with YAML frontmatter and Markdown body. "
             "Example frontmatter:\n"

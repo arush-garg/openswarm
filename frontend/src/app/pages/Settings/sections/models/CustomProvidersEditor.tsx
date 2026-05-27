@@ -62,13 +62,25 @@ const CustomProvidersEditor: React.FC<{
             setForm({ ...form, custom_providers: next });
           };
           const addModel = () => {
-            const nextModels = [...(cp.models || []), { value: '', label: '' }];
+            const nextModels = [...(cp.models || []), { value: '', label: '', context_window: undefined }];
             updateProvider({ models: nextModels });
           };
           const updateModel = (mIdx: number, value: string) => {
             const nextModels = (cp.models || []).map((m, i) =>
               i === mIdx ? { ...m, value, label: value } : m
             );
+            updateProvider({ models: nextModels });
+          };
+          const updateModelContextWindow = (mIdx: number, rawValue: string) => {
+            const nextModels = (cp.models || []).map((m, i) => {
+              if (i !== mIdx) return m;
+              const trimmed = rawValue.trim();
+              const context_window = trimmed ? Number.parseInt(trimmed, 10) : undefined;
+              return {
+                ...m,
+                context_window: Number.isFinite(context_window) && context_window > 0 ? context_window : undefined,
+              };
+            });
             updateProvider({ models: nextModels });
           };
           const removeModel = (mIdx: number) => {
@@ -193,13 +205,24 @@ const CustomProvidersEditor: React.FC<{
                   </Typography>
                 ) : (
                   (cp.models || []).map((m, mIdx) => (
-                    <Box key={mIdx} sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+                    <Box key={mIdx} sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 9.5rem auto', gap: 0.5, alignItems: 'center' }}>
                       <TextField
                         value={m.value || ''}
                         onChange={(e) => updateModel(mIdx, e.target.value)}
                         size="small"
                         fullWidth
                         placeholder="e.g. gpt-oss:120b"
+                        sx={{ ...fieldSx, '& .MuiOutlinedInput-root': { ...fieldSx['& .MuiOutlinedInput-root'], fontFamily: c.font.mono, fontSize: '0.78rem' } }}
+                      />
+                      <TextField
+                        value={typeof m.context_window === 'number' ? String(m.context_window) : ''}
+                        onChange={(e) => updateModelContextWindow(mIdx, e.target.value)}
+                        size="small"
+                        placeholder="64000"
+                        label="Context window"
+                        type="number"
+                        inputProps={{ min: 1, step: 1 }}
+                        InputLabelProps={{ shrink: true, sx: { fontSize: '0.72rem', color: c.text.tertiary } }}
                         sx={{ ...fieldSx, '& .MuiOutlinedInput-root': { ...fieldSx['& .MuiOutlinedInput-root'], fontFamily: c.font.mono, fontSize: '0.78rem' } }}
                       />
                       <IconButton

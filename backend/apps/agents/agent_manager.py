@@ -82,6 +82,7 @@ from backend.apps.tools_lib.tools_lib import (
     save_trusted_sensitive_paths,
 )
 from backend.config.paths import SESSIONS_DIR
+from backend.config.paths import DASHBOARDS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,25 @@ def _apply_context_window(session, settings=None) -> None:
             session.context_window = cw
     except Exception:
         logger.debug("context_window lookup failed; keeping existing value", exc_info=True)
+
+
+def _load_dashboard_session_ids() -> set[str]:
+    session_ids: set[str] = set()
+    if not os.path.exists(DASHBOARDS_DIR):
+        return session_ids
+    for fname in os.listdir(DASHBOARDS_DIR):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(DASHBOARDS_DIR, fname), "r", encoding="utf-8") as f:
+                dashboard = json.load(f)
+        except Exception:
+            continue
+        layout = dashboard.get("layout") or {}
+        cards = layout.get("cards") or {}
+        if isinstance(cards, dict):
+            session_ids.update(cards.keys())
+    return session_ids
 
 
 def _custom_provider_env_for_model(
@@ -2785,6 +2805,14 @@ class AgentManager:
 
                         if content_parts:
                             _asst_text = "\n".join(content_parts)
+
+                            # 9Router sometimes returns upstream 429s as
+                            # the assistant reply (no SDK exception), so
+                            # the standard capacity handler never fires.
+                            _looks_like_capacity = _is_transient_capacity_error(RuntimeError(""), _asst_text)
+                            if _looks_like_capacity:
+                                raise RuntimeError(f"Router returned transient capacity error as assistant text: {_asst_text}")
+
                             # 9Router sometimes returns upstream 401s as
                             # the assistant reply (no SDK exception), so
                             # the catch-all auth handler never fires.
@@ -4329,17 +4357,20 @@ class AgentManager:
     async def restore_all_sessions(self) -> None:
         """On startup, reload all persisted sessions from JSON files back into memory.
 
-        Only sessions without closed_at are restored (they were active at
-        shutdown).  Sessions with closed_at were explicitly closed by the user
-        and stay on disk so the history endpoint can still serve them.
+        All persisted sessions are restored so the dashboard can render
+        closed/stopped cards after a restart, but only if they are still
+        referenced by a dashboard card. Any session that was still marked
+        running or waiting_approval at shutdown is normalized to stopped
+        before being rehydrated into memory.
         """
+        dashboard_session_ids = _load_dashboard_session_ids()
         for sid, data in _load_all_session_data():
             try:
                 session = AgentSession(**data)
             except Exception as e:
                 logger.warning(f"Skipping corrupt session file {sid}: {e}")
                 continue
-            if session.closed_at is not None:
+            if session.closed_at is not None and sid not in dashboard_session_ids:
                 continue
             if session.status in ("running", "waiting_approval"):
                 session.status = "stopped"

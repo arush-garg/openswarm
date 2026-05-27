@@ -8,8 +8,12 @@ importers keep their single entry point.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any, TYPE_CHECKING
+from urllib.parse import urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 from .openrouter import (
     _OPENROUTER_VALUE_PREFIX,
@@ -223,6 +227,114 @@ def _find_builtin_model(short_name: str) -> dict | None:
     return None
 
 
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return None
+    return coerced if coerced > 0 else None
+
+
+def _looks_like_ollama_provider(provider_name: str, base_url: str) -> bool:
+    provider_name = (provider_name or "").strip().lower()
+    if "ollama" in provider_name:
+        return True
+    try:
+        parsed = urlparse((base_url or "").strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1"} and parsed.port == 11434
+
+
+def _ollama_native_base_url(base_url: str) -> str | None:
+    try:
+        parsed = urlparse((base_url or "").strip().rstrip("/"))
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    path = (parsed.path or "").rstrip("/")
+    if path in {"", "/v1"}:
+        native_path = ""
+    elif path.endswith("/v1"):
+        native_path = path[:-3]
+    else:
+        return None
+    return urlunparse((parsed.scheme, parsed.netloc, native_path, "", "", "")).rstrip("/")
+
+
+def _detect_ollama_context_window(base_url: str, model_name: str) -> int | None:
+    native_base = _ollama_native_base_url(base_url)
+    if not native_base:
+        return None
+    model_name = (model_name or "").strip()
+    if not model_name:
+        return None
+    try:
+        payload = json.dumps({"model": model_name}).encode("utf-8")
+        request = Request(
+            f"{native_base}/api/show",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=2.0) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    model_info = data.get("model_info")
+    if isinstance(model_info, dict):
+        for key, value in model_info.items():
+            if not isinstance(key, str):
+                continue
+            if key.endswith(".context_length") or key == "context_length" or key.endswith(".num_ctx") or key == "num_ctx":
+                coerced = _coerce_positive_int(value)
+                if coerced is not None:
+                    return coerced
+
+    for key in ("context_length", "num_ctx"):
+        coerced = _coerce_positive_int(data.get(key))
+        if coerced is not None:
+            return coerced
+
+    for field in ("parameters", "modelfile"):
+        text = data.get(field)
+        if isinstance(text, str):
+            match = re.search(r"\bnum_ctx\s+(\d+)", text)
+            if match:
+                return int(match.group(1))
+
+    return None
+
+
+def get_custom_provider_model_context_window(
+    provider_name: str,
+    base_url: str,
+    model: dict[str, Any] | str,
+) -> int:
+    """Return a custom-provider model's context window, autodetecting Ollama when needed."""
+    bare_model = ""
+    if isinstance(model, dict):
+        cw = _coerce_positive_int(model.get("context_window"))
+        if cw is not None:
+            return cw
+        bare_model = (model.get("value") or model.get("id") or "").strip()
+    else:
+        bare_model = (model or "").strip()
+
+    if _looks_like_ollama_provider(provider_name, base_url):
+        detected = _detect_ollama_context_window(base_url, bare_model)
+        if detected is not None:
+            return detected
+
+    return 128_000
+
+
 def get_api_type(short_name: str) -> str:
     entry = _find_builtin_model(short_name)
     return (entry or {}).get("api", "anthropic")
@@ -377,9 +489,11 @@ def get_context_window(provider: str, model: str, settings: AppSettings | None =
         for cp in getattr(settings, "custom_providers", []):
             for m in (getattr(cp, "models", None) or []):
                 if m.get("value") == bare_model or m.get("id") == bare_model:
-                    cw = m.get("context_window")
-                    if isinstance(cw, int) and cw > 0:
-                        return cw
+                    return get_custom_provider_model_context_window(
+                        getattr(cp, "name", "") or "",
+                        getattr(cp, "base_url", "") or "",
+                        m,
+                    )
 
     return 128_000  # safe default
 
