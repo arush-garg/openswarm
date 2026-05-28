@@ -28,7 +28,7 @@ import {
   removeCard,
 } from '@/shared/state/dashboardLayoutSlice';
 import { useAppDispatch, useAppSelector } from '@/shared/hooks';
-import { QuestionForm } from '@/app/pages/AgentChat/shell/ApprovalBar';
+import ApprovalBar, { QuestionForm } from '@/app/pages/AgentChat/shell/ApprovalBar';
 import AgentChat from '@/app/pages/AgentChat/AgentChat';
 import InlineEditableSessionName from '@/app/components/InlineEditableSessionName';
 import { parseMcpToolName, getMcpShortAction } from '@/shared/mcpToolMeta';
@@ -1176,7 +1176,7 @@ const AgentCard: React.FC<Props> = ({
                       </Typography>
                     </Box>
                   </Box>
-                  {session.pending_approvals.length === 1 && (
+                  {session.pending_approvals.length === 1 && pendingReq.tool_name !== 'Bash' && (
                     <Box sx={{ display: 'flex', gap: 0.5, ml: 1 }}>
                       <Tooltip title="Approve">
                         <IconButton
@@ -1199,6 +1199,19 @@ const AgentCard: React.FC<Props> = ({
                     </Box>
                   )}
                 </Box>
+                {session.pending_approvals.length === 1 && pendingReq.tool_name === 'Bash' && (
+                  <Box onClick={(e) => e.stopPropagation()} sx={{ mt: 1 }}>
+                    <ApprovalBar
+                      request={pendingReq}
+                      onApprove={(requestId, updatedInput, trustPattern, trustCommandMode) =>
+                        dispatch(handleApproval({ requestId, behavior: 'allow', updatedInput, trustPattern, trustCommandMode }))
+                      }
+                      onDeny={(requestId, message) =>
+                        dispatch(handleApproval({ requestId, behavior: 'deny', message }))
+                      }
+                    />
+                  </Box>
+                )}
               )}
               {session.pending_approvals.length > 1 && (
                 <Box

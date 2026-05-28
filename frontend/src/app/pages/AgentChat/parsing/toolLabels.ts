@@ -894,3 +894,13 @@ export function bashCommandDetail(rawCmd: string): string {
   if (arg.includes('/') || arg.includes('\\')) return prettyPath(arg);
   return arg.length > 50 ? arg.slice(0, 47) + '…' : arg;
 }
+
+export function bashCommandType(rawCmd: string): string {
+  if (!rawCmd) return '';
+  const cmd = rawCmd.trim();
+  const stripped = cmd
+    .replace(/^(?:[A-Z_][A-Z0-9_]*=\S+\s+)+/, '')
+    .replace(/^(?:sudo|time|nice|env)\s+/, '');
+  const tokens = stripped.split(/\s+/);
+  return (tokens[0] || '').split('/').pop()?.toLowerCase() || '';
+}

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import re
 import sys
 import time
@@ -76,10 +77,12 @@ from backend.apps.tools_lib.tools_lib import (
     _sanitize_server_name,
     derive_mcp_config,
     load_builtin_permissions,
+    load_trusted_bash_commands,
     load_trusted_sensitive_paths,
     refresh_airtable_token,
     refresh_google_token,
     refresh_hubspot_token,
+    save_trusted_bash_commands,
     save_trusted_sensitive_paths,
 )
 from backend.config.paths import SESSIONS_DIR
@@ -117,140 +120,155 @@ def _apply_context_window(session, settings=None) -> None:
         logger.debug("context_window lookup failed; keeping existing value", exc_info=True)
 
 
-def _set_turn_token_totals(session, baseline_input: int, baseline_output: int, turn_input: int, turn_output: int) -> None:
-    """Write cumulative token totals for the current turn.
+def _delete_session_file(session_id: str):
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if os.path.exists(path):
+        os.remove(path)
 
-    session.tokens is treated as a running session total everywhere the UI
-    and compaction logic read it, so each turn must add its usage on top of
-    the baseline captured at turn start.
+
+# Patterns that indicate an upstream transient problem (overload / rate limit /
+# infra blip) — safe to silently retry with backoff. Checked against the
+# stringified exception from claude_agent_sdk / Claude CLI.
+_TRANSIENT_CAPACITY_PATTERNS = re.compile(
+    r"(?:\b(?:429|500|502|503|504|529)\b"
+    r"|overloaded"
+    r"|service\s+(?:temporarily\s+)?unavailable"
+    r"|at\s+capacity"
+    r"|try\s+again\s+shortly"
+    r"|internal\s+server\s+error"
+    r"|rate[_\s-]?limit(?:_error)?"
+    r"|ECONNRESET|ETIMEDOUT|ENETUNREACH|fetch\s+failed"
+    r"|upstream\s+connect\s+error)",
+    re.IGNORECASE,
+)
+
+# Patterns that look rate-limit-ish but are actually non-transient (user quota,
+# auth, context-window tier gate). Must NOT retry — upgrading, reauthing, or
+# trimming context is required. The long-context-required variant is what
+# Anthropic returns when an OAuth Pro/Max account ships a request whose input
+# exceeds the 200K standard tier and would need the "extra usage" tier; the
+# user can't recover by waiting, so we surface it instead of looping.
+_NON_TRANSIENT_PATTERNS = re.compile(
+    r"(?:usage\s+cap\s+exceeded"
+    r"|reached\s+your\s+OpenSwarm.*plan\s+limit"
+    r"|no\s+active\s+subscription"
+    r"|subscription\s+(?:canceled|past_due)"
+    r"|invalid.*token"
+    r"|missing\s+bearer\s+token"
+    r"|extra\s+usage\s+is\s+required\s+for\s+long\s+context"
+    r"|long\s+context\s+(?:requests?\s+)?(?:requires?|not\s+(?:available|enabled))"
+    r"|401|403)",
+    re.IGNORECASE,
+)
+
+
+def _is_long_context_error(exc: BaseException, extra_text: str = "") -> bool:
+    """True when the upstream error is the 'long context tier required' 429.
+
+    Used by the catch-all error path to emit a friendly context-overflow
+    event instead of a generic system-error message.
     """
-    if not isinstance(getattr(session, "tokens", None), dict):
-        session.tokens = {}
-    session.tokens["input"] = baseline_input + max(0, turn_input)
-    session.tokens["output"] = baseline_output + max(0, turn_output)
+    combined = f"{exc!s}\n{extra_text}".strip()
+    if not combined:
+        return False
+    return bool(re.search(
+        r"extra\s+usage\s+is\s+required\s+for\s+long\s+context"
+        r"|long\s+context\s+(?:requests?\s+)?(?:requires?|not\s+(?:available|enabled))",
+        combined,
+        re.IGNORECASE,
+    ))
 
 
-def _load_dashboard_session_ids() -> set[str]:
-    session_ids: set[str] = set()
-    if not os.path.exists(DASHBOARDS_DIR):
-        return session_ids
-    for fname in os.listdir(DASHBOARDS_DIR):
-        if not fname.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(DASHBOARDS_DIR, fname), "r", encoding="utf-8") as f:
-                dashboard = json.load(f)
-        except Exception:
-            continue
-        layout = dashboard.get("layout") or {}
-        cards = layout.get("cards") or {}
-        if isinstance(cards, dict):
-            for k, v in cards.items():
-                session_ids.add(k)
-                if isinstance(v, dict) and "session_id" in v:
-                    session_ids.add(v["session_id"])
-        
-        # Check both layout.expanded_session_ids and root expanded_session_ids
-        expanded = layout.get("expanded_session_ids") or dashboard.get("expanded_session_ids") or []
-        if isinstance(expanded, list):
-            for eid in expanded:
-                if isinstance(eid, str):
-                    session_ids.add(eid)
-    return session_ids
+def _is_auth_error(exc: BaseException, extra_text: str = "") -> bool:
+    """True when the upstream error is a 401/403 auth failure.
+
+    Used by the catch-all error path to surface a friendly "subscription
+    expired / reconnect" card instead of dumping the raw 401 JSON. The most
+    common cause: the OpenSwarm Pro bearer or 9Router OAuth token has expired
+    while the UI still shows the connection as 'connected'.
+    """
+    combined = f"{exc!s}\n{extra_text}".strip()
+    if not combined:
+        return False
+    return bool(re.search(
+        r"\b(401|403)\b"
+        r"|invalid\s+authentication\s+credentials"
+        r"|invalid.*api[_\s-]?key"
+        r"|missing\s+bearer\s+token"
+        r"|unauthori[sz]ed"
+        r"|no\s+credentials\s+for\s+provider"
+        r"|provider\s+not\s+(?:configured|connected|authorized)",
+        combined,
+        re.IGNORECASE,
+    ))
 
 
-def _custom_provider_env_for_model(
-    model_value: str,
-    global_settings=None,
-    resolved_model: str | None = None,
-) -> dict[str, str] | None:
-    from backend.apps.agents.providers.registry import (
-        _find_custom_provider_for_value,
-        resolve_model_id_for_sdk as _resolve_model_id_for_sdk,
-    )
-    from backend.apps.nine_router import normalize_openai_compat_base_url as _norm_cp_url
+def _is_transient_capacity_error(exc: BaseException, extra_text: str = "") -> bool:
+    # The Claude CLI's underlying ProcessError stringifies to a generic
+    # "Command failed with exit code 1 / Check stderr output for details" —
+    # the real cause (rate_limit_error / No pool capacity available / 429
+    # / overloaded) only surfaces in the subprocess's stderr stream, which
+    # we capture via the SDK's `stderr` callback and pass in as extra_text.
+    # Classify against both so we catch capacity errors regardless of which
+    # channel carried the message.
+    combined = f"{exc!s}\n{extra_text}".strip()
+    if not combined:
+        return False
+    if _NON_TRANSIENT_PATTERNS.search(combined):
+        return False
+    if _TRANSIENT_CAPACITY_PATTERNS.search(combined):
+        return True
+    # Pool-exhaustion copy from the OpenSwarm proxy ("No pool capacity
+    # available. Try again shortly.") — matches the capacity family too.
+    if re.search(r"no\s+pool\s+capacity", combined, re.IGNORECASE):
+        return True
+    return False
 
-    if global_settings is None:
-        global_settings = load_settings()
-    if resolved_model is None:
-        resolved_model = _resolve_model_id_for_sdk(model_value, global_settings)
 
-    cp = _find_custom_provider_for_value(global_settings, model_value)
-    if not cp:
-        return None
+def _load_all_session_data() -> list[tuple[str, dict]]:
+    results = []
+    if not os.path.exists(SESSIONS_DIR):
+        return results
+    for fname in os.listdir(SESSIONS_DIR):
+        if fname.endswith(".json"):
+            with open(os.path.join(SESSIONS_DIR, fname)) as f:
+                results.append((fname[:-5], json.load(f)))
+    return results
 
-    env = {
-        "ANTHROPIC_API_KEY": "9router",
-        "ANTHROPIC_BASE_URL": "http://localhost:20128",
-        "ENABLE_TOOL_SEARCH": "auto",
-        "OPENAI_API_KEY": (getattr(cp, "api_key", "") or "").strip() or "no-auth-required",
-        "OPENAI_BASE_URL": _norm_cp_url(getattr(cp, "base_url", "") or ""),
+FULL_TOOLS = [
+    "Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion",
+    "WebSearch", "WebFetch", "NotebookEdit", "TodoWrite",
+    "EnterPlanMode", "ExitPlanMode", "EnterWorktree",
+    "TaskOutput", "TaskStop",
+    "CronCreate", "CronList", "CronDelete",
+    "InvokeAgent",
+    "Agent",
+    # ToolSearch is the loader the CLI uses to expose deferred tool schemas
+    # on demand. Must be in the allowedTools whitelist or the model can't
+    # call it, which means none of the deferred extended tools become
+    # reachable even when the CLI advertises them in the system prompt.
+    "ToolSearch",
+]
+
+def _get_denied_tool_names(tool) -> set[str]:
+    """Return the set of MCP sub-tool names whose permission is 'deny'."""
+    return {
+        key for key, value in tool.tool_permissions.items()
+        if not key.startswith("_") and value == "deny"
     }
 
-    if getattr(global_settings, "anthropic_api_key", None):
-        env["CLAUDE_CODE_SUBAGENT_MODEL"] = "claude-sonnet-4-6"
-        env["ANTHROPIC_SMALL_FAST_MODEL"] = "claude-haiku-4-5-20251001"
-        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "claude-haiku-4-5-20251001"
-    else:
-        env["CLAUDE_CODE_SUBAGENT_MODEL"] = resolved_model
-        env["ANTHROPIC_SMALL_FAST_MODEL"] = resolved_model
-        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = resolved_model
-    return env
+
+def _get_all_known_tool_names(tool) -> set[str]:
+    """Return all known sub-tool names for an MCP tool (from _tool_descriptions)."""
+    return set(tool.tool_permissions.get("_tool_descriptions", {}).keys())
 
 
-def _pick_custom_provider_fallback_model(
-    model_or_settings,
-    maybe_model_value: str | None = None,
-) -> str | None:
-    from backend.apps.agents.providers.registry import (
-        _custom_provider_slug_for_lookup,
-        _find_custom_provider_for_value,
-    )
-
-    if isinstance(model_or_settings, str):
-        model_value = model_or_settings
-        global_settings = load_settings()
-    else:
-        global_settings = model_or_settings if model_or_settings is not None else load_settings()
-        model_value = maybe_model_value
-
-    if not model_value:
-        return None
-
-    current_cp = _find_custom_provider_for_value(global_settings, model_value)
-    current_name = getattr(current_cp, "name", "") if current_cp else ""
-    current_base_url = getattr(current_cp, "base_url", "") if current_cp else ""
-    current_slug = _custom_provider_slug_for_lookup(current_name) if current_name else ""
-
-    candidates: list[tuple[int, str]] = []
-    for cp in getattr(global_settings, "custom_providers", []) or []:
-        name = getattr(cp, "name", "") or ""
-        slug = _custom_provider_slug_for_lookup(name)
-        if not slug or slug == current_slug:
-            continue
-        models = getattr(cp, "models", []) or []
-        if not models:
-            continue
-        first = models[0]
-        model_id = (
-            (first.get("value") or "").strip()
-            if isinstance(first, dict)
-            else (getattr(first, "value", "") or "").strip()
-        )
-        if not model_id:
-            continue
-        base_url = (getattr(cp, "base_url", "") or "").strip()
-        score = 0
-        if base_url and base_url != current_base_url:
-            score += 2
-        if name and name != current_name:
-            score += 1
-        candidates.append((score, f"custom/{slug}/{model_id}"))
-
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: (-item[0], item[1]))
-    return candidates[0][1]
+def _is_fully_denied(tool) -> bool:
+    """True when every known sub-tool on this MCP server is set to 'deny'."""
+    known = _get_all_known_tool_names(tool)
+    if not known:
+        return False
+    return known <= _get_denied_tool_names(tool)
 
 
 def get_all_tool_names() -> list[str]:
@@ -911,6 +929,46 @@ class AgentManager:
         }
         _BASH_CATASTROPHIC_PATTERNS = tuple(_BASH_CATASTROPHIC_INFO.keys())
 
+        def _normalize_bash_command(command: str) -> str:
+            return " ".join(command.strip().split())
+
+        def _extract_bash_command_type(command: str) -> str:
+            if not command or not isinstance(command, str):
+                return ""
+            try:
+                tokens = shlex.split(command, posix=True)
+            except Exception:
+                tokens = command.strip().split()
+            if not tokens:
+                return ""
+            while tokens and re.match(r"^[A-Z_][A-Z0-9_]*=.*", tokens[0]):
+                tokens = tokens[1:]
+            while tokens and tokens[0] in {"sudo", "time", "nice", "env"} and len(tokens) > 1:
+                tokens = tokens[1:]
+            if not tokens:
+                return ""
+            return (tokens[0].split("/")[-1] or tokens[0]).lower()
+
+        def _match_trusted_bash_command(command: str) -> dict[str, str] | None:
+            if not command or not isinstance(command, str):
+                return None
+            normalized = _normalize_bash_command(command)
+            if not normalized:
+                return None
+            command_type = _extract_bash_command_type(normalized)
+            for rule in load_trusted_bash_commands():
+                kind = rule.get("kind")
+                value = _normalize_bash_command(rule.get("value") or "")
+                if not kind or not value:
+                    continue
+                if kind == "exact" and normalized == value:
+                    return rule
+                if kind == "prefix" and (normalized == value or normalized.startswith(f"{value} ")):
+                    return rule
+                if kind == "type" and command_type and command_type == value.lower():
+                    return rule
+            return None
+
         # Token-extraction regex: pulls quoted strings AND bare path-like
         # tokens out of the Bash command so we can match against the
         # catastrophic list. Intentionally loose: false positives just
@@ -986,7 +1044,11 @@ class AgentManager:
             if tool_name == "Bash" and _looks_like_os_scheduling(tool_input):
                 return "ask", None
             if tool_name == "Bash" and isinstance(tool_input, dict):
-                bash_match = _match_bash_catastrophic_pattern(str(tool_input.get("command") or ""))
+                bash_command = str(tool_input.get("command") or "")
+                trusted_bash_rule = _match_trusted_bash_command(bash_command)
+                if trusted_bash_rule:
+                    return "always_allow", None
+                bash_match = _match_bash_catastrophic_pattern(bash_command)
                 if bash_match:
                     return "ask", bash_match
             if policy != "always_allow" or tool_name not in _PATH_GATED_TOOLS:
@@ -1075,6 +1137,32 @@ class AgentManager:
                         save_trusted_sensitive_paths(existing)
                 except Exception:
                     logger.exception("Failed to persist trusted sensitive path")
+
+            if (
+                decision.get("behavior") == "allow"
+                and decision.get("trust_command_mode")
+                and tool_name == "Bash"
+                and isinstance(safe_input, dict)
+            ):
+                try:
+                    command = str(safe_input.get("command") or "")
+                    normalized_command = _normalize_bash_command(command)
+                    if normalized_command:
+                        mode = str(decision.get("trust_command_mode") or "").lower()
+                        rule: dict[str, str] | None = None
+                        if mode in {"exact", "prefix"}:
+                            rule = {"kind": mode, "value": normalized_command}
+                        elif mode == "type":
+                            command_type = _extract_bash_command_type(normalized_command)
+                            if command_type:
+                                rule = {"kind": "type", "value": command_type}
+                        if rule:
+                            existing_rules = load_trusted_bash_commands()
+                            if rule not in existing_rules:
+                                existing_rules.append(rule)
+                                save_trusted_bash_commands(existing_rules)
+                except Exception:
+                    logger.exception("Failed to persist trusted Bash command")
 
             approval_latency_ms = int((datetime.now() - approval_req.created_at).total_seconds() * 1000)
             try:

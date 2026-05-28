@@ -32,8 +32,9 @@ import { updateSettings, closeSettingsModal, resetSystemPrompt, disconnectSubscr
 import { onboardingBus } from '@/app/components/Onboarding/eventBus';
 import { fetchModels } from '@/shared/state/modelsSlice';
 import { fetchModes } from '@/shared/state/modesSlice';
-import { useThemeMode, useClaudeTokens } from '@/shared/styles/ThemeContext';
+import { useClaudeTokens, useThemeMode } from '@/shared/styles/ThemeContext';
 import DirectoryBrowser from '@/app/components/editor/DirectoryBrowser';
+import TrustedBashCommands from '@/app/components/TrustedBashCommands';
 import { CommandsContent } from '@/app/pages/Commands/Commands';
 import GeneralTab from './sections/general/GeneralTab';
 import ModelsTab from './sections/models/ModelsTab';
@@ -1510,6 +1511,8 @@ const Settings: React.FC = () => {
         <GeneralAdvanced form={form} setForm={setForm} styles={styles} />
 
         <TrustedFilePatterns />
+
+        <TrustedBashCommands />
 
 
         <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

@@ -8,6 +8,10 @@ import Collapse from '@mui/material/Collapse';
 import IconButton from '@mui/material/IconButton';
 import Checkbox from '@mui/material/Checkbox';
 import FormControlLabel from '@mui/material/FormControlLabel';
+import FormControl from '@mui/material/FormControl';
+import InputLabel from '@mui/material/InputLabel';
+import MenuItem from '@mui/material/MenuItem';
+import Select from '@mui/material/Select';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import SendIcon from '@mui/icons-material/Send';
 import CheckIcon from '@mui/icons-material/Check';
@@ -25,6 +29,7 @@ import { ApprovalRequest } from '@/shared/state/agentsSlice';
 import { useAppSelector } from '@/shared/hooks';
 import { ToolDefinition } from '@/shared/state/toolsSlice';
 import { useClaudeTokens } from '@/shared/styles/ThemeContext';
+import { bashCommandType } from './toolLabels';
 
 interface IntegrationMeta {
   label: string;
@@ -163,7 +168,7 @@ function getMcpInputSummary(actionName: string, toolInput: Record<string, any>):
 
 interface Props {
   request: ApprovalRequest;
-  onApprove: (requestId: string, updatedInput?: Record<string, any>, trustPattern?: boolean) => void;
+  onApprove: (requestId: string, updatedInput?: Record<string, any>, trustPattern?: boolean, trustCommandMode?: 'exact' | 'prefix' | 'type') => void;
   onDeny: (requestId: string, message?: string) => void;
 }
 
@@ -305,7 +310,7 @@ type Answers = Record<number, string | string[]>;
 
 export interface QuestionFormProps {
   request: ApprovalRequest;
-  onApprove: (requestId: string, updatedInput?: Record<string, any>, trustPattern?: boolean) => void;
+  onApprove: (requestId: string, updatedInput?: Record<string, any>, trustPattern?: boolean, trustCommandMode?: 'exact' | 'prefix' | 'type') => void;
   onDeny: (requestId: string, message?: string) => void;
   compact?: boolean;
 }
@@ -565,6 +570,8 @@ const GenericApprovalBar: React.FC<Props> = ({ request, onApprove, onDeny }) => 
   const [showDenyInput, setShowDenyInput] = useState(false);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [trustPattern, setTrustPattern] = useState(false);
+  const [trustBashCommand, setTrustBashCommand] = useState(false);
+  const [trustCommandMode, setTrustCommandMode] = useState<'exact' | 'prefix' | 'type'>('exact');
 
   const parsed = useMemo(() => parseMcpToolName(request.tool_name), [request.tool_name]);
   const meta = useMcpToolMeta(parsed);
@@ -572,6 +579,9 @@ const GenericApprovalBar: React.FC<Props> = ({ request, onApprove, onDeny }) => 
   const accentColor = meta.integration?.color || c.status.warning;
   const summary = parsed.isMcp ? getMcpInputSummary(parsed.actionName, request.tool_input) : '';
   const isSensitive = !!request.sensitive_pattern;
+  const isBash = request.tool_name === 'Bash';
+  const bashCommand = String(request.tool_input.command || '');
+  const bashCommandKind = bashCommandType(bashCommand);
 
   if (!parsed.isMcp) {
     return (
@@ -639,6 +649,61 @@ const GenericApprovalBar: React.FC<Props> = ({ request, onApprove, onDeny }) => 
           <ToolPreview request={request} tokens={c} />
         </Box>
 
+        {isBash && bashCommand && (
+          <Box
+            sx={{
+              mb: 1,
+              p: 1,
+              borderRadius: 1.5,
+              border: `1px solid ${c.border.subtle}`,
+              bgcolor: c.bg.secondary,
+            }}
+          >
+            <FormControlLabel
+              sx={{
+                ml: 0,
+                alignItems: 'flex-start',
+                '& .MuiFormControlLabel-label': { fontSize: '0.78rem', color: c.text.secondary, lineHeight: 1.35, pt: 0.5 },
+              }}
+              control={
+                <Checkbox
+                  size="small"
+                  checked={trustBashCommand}
+                  onChange={(e) => {
+                    setTrustBashCommand(e.target.checked);
+                    if (!e.target.checked) setTrustCommandMode('exact');
+                  }}
+                  sx={{ p: 0.5, color: c.text.tertiary, '&.Mui-checked': { color: c.status.warning } }}
+                />
+              }
+              label="Always allow this Bash command"
+            />
+            <Collapse in={trustBashCommand}>
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75, mt: 0.75 }}>
+                <FormControl fullWidth size="small">
+                  <InputLabel id={`bash-trust-mode-${request.id}`}>Allow scope</InputLabel>
+                  <Select
+                    labelId={`bash-trust-mode-${request.id}`}
+                    value={trustCommandMode}
+                    label="Allow scope"
+                    onChange={(e) => setTrustCommandMode(e.target.value as 'exact' | 'prefix' | 'type')}
+                    sx={{ fontSize: '0.8rem' }}
+                  >
+                    <MenuItem value="exact">Exact command</MenuItem>
+                    <MenuItem value="prefix">Command prefix</MenuItem>
+                    <MenuItem value="type" disabled={!bashCommandKind}>
+                      Command type {bashCommandKind ? `(${bashCommandKind})` : ''}
+                    </MenuItem>
+                  </Select>
+                </FormControl>
+                <Typography sx={{ color: c.text.tertiary, fontSize: '0.72rem', lineHeight: 1.35 }}>
+                  Exact matches only this command. Prefix matches the same command with more arguments. Type matches commands like {bashCommandKind || 'ls'} regardless of arguments.
+                </Typography>
+              </Box>
+            </Collapse>
+          </Box>
+        )}
+
         {isSensitive && (
           <FormControlLabel
             sx={{
@@ -686,7 +751,7 @@ const GenericApprovalBar: React.FC<Props> = ({ request, onApprove, onDeny }) => 
           <Button
             variant="contained"
             startIcon={<CheckIcon />}
-            onClick={() => onApprove(request.id, undefined, isSensitive && trustPattern)}
+            onClick={() => onApprove(request.id, undefined, isSensitive && trustPattern, isBash && trustBashCommand ? trustCommandMode : undefined)}
             sx={{ bgcolor: c.status.success, '&:hover': { bgcolor: '#1e4d15' }, fontWeight: 600, fontSize: '0.8rem' }}
           >
             Approve
@@ -913,7 +978,7 @@ interface ToolGroup {
 
 interface BatchApprovalBarProps {
   requests: ApprovalRequest[];
-  onApprove: (requestId: string, updatedInput?: Record<string, any>, trustPattern?: boolean) => void;
+  onApprove: (requestId: string, updatedInput?: Record<string, any>, trustPattern?: boolean, trustCommandMode?: 'exact' | 'prefix' | 'type') => void;
   onDeny: (requestId: string, message?: string) => void;
 }
 
@@ -1053,7 +1118,7 @@ interface GroupRowProps {
   group: ToolGroup;
   expanded: boolean;
   onToggle: () => void;
-  onApprove: (requestId: string, updatedInput?: Record<string, any>, trustPattern?: boolean) => void;
+  onApprove: (requestId: string, updatedInput?: Record<string, any>, trustPattern?: boolean, trustCommandMode?: 'exact' | 'prefix' | 'type') => void;
   onDeny: (requestId: string, message?: string) => void;
   onApproveGroup: () => void;
   onDenyGroup: () => void;
