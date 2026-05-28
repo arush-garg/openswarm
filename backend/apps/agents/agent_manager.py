@@ -130,8 +130,12 @@ def _load_session_data(session_id: str) -> dict | None:
     path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
     if not os.path.exists(path):
         return None
-    with open(path) as f:
-        return json.load(f)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        # Return None for corrupt JSON files, allowing them to be skipped
+        return None
 
 
 def _delete_session_file(session_id: str):
