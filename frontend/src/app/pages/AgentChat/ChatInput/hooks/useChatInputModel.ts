@@ -26,6 +26,7 @@ export function useChatInputModel(model: string) {
         label: m.label,
         context_window: m.context_window ?? 200_000,
         reasoning: !!m.reasoning,
+        supports_images: !!m.supports_images,
         input_cost_per_1m: m.input_cost_per_1m ?? 0,
         output_cost_per_1m: m.output_cost_per_1m ?? 0,
         is_free: !!m.is_free,
@@ -61,7 +62,9 @@ export function useChatInputModel(model: string) {
     ['anthropic', 'gemini', 'gemini-cli', 'openrouter'].includes(currentModelApi) ||
     (currentModelApi === 'openai' && !isCodexModel)
   );
-  const imageSupported = ['anthropic', 'gemini', 'gemini-cli', 'openai', 'openrouter'].includes(currentModelApi);
+  const currentModel = allModelOptions.flat.find((x: any) => x.value === model) as any;
+  const currentModelSupportsImage = !!currentModel?.supports_images;
+  const imageSupported = currentModelSupportsImage || ['anthropic', 'gemini', 'gemini-cli', 'openai', 'openrouter'].includes(currentModelApi);
 
   return { allModelOptions, currentModelCtx, currentModelApi, pdfSupported, imageSupported };
 }

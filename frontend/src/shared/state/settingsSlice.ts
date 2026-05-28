@@ -24,7 +24,7 @@ export interface CustomProvider {
   name: string;
   base_url: string;
   api_key: string;
-  models: Array<{ value: string; label: string; context_window?: number }>;
+  models: Array<{ value: string; label: string; context_window?: number; supports_images?: boolean }>;
 }
 
 export interface SubscriptionUsage {

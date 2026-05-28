@@ -2,6 +2,8 @@ import React from 'react';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import TextField from '@mui/material/TextField';
+import Checkbox from '@mui/material/Checkbox';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
 import InputAdornment from '@mui/material/InputAdornment';
@@ -62,7 +64,7 @@ const CustomProvidersEditor: React.FC<{
             setForm({ ...form, custom_providers: next });
           };
           const addModel = () => {
-            const nextModels = [...(cp.models || []), { value: '', label: '', context_window: undefined }];
+            const nextModels = [...(cp.models || []), { value: '', label: '', context_window: undefined, supports_images: false }];
             updateProvider({ models: nextModels });
           };
           const updateModel = (mIdx: number, value: string) => {
@@ -205,7 +207,7 @@ const CustomProvidersEditor: React.FC<{
                   </Typography>
                 ) : (
                   (cp.models || []).map((m, mIdx) => (
-                    <Box key={mIdx} sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 9.5rem auto', gap: 0.5, alignItems: 'center' }}>
+                    <Box key={mIdx} sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 9.5rem 6rem auto', gap: 0.5, alignItems: 'center' }}>
                       <TextField
                         value={m.value || ''}
                         onChange={(e) => updateModel(mIdx, e.target.value)}
@@ -225,6 +227,23 @@ const CustomProvidersEditor: React.FC<{
                         InputLabelProps={{ shrink: true, sx: { fontSize: '0.72rem', color: c.text.tertiary } }}
                         sx={{ ...fieldSx, '& .MuiOutlinedInput-root': { ...fieldSx['& .MuiOutlinedInput-root'], fontFamily: c.font.mono, fontSize: '0.78rem' } }}
                       />
+                      <Box sx={{ display: 'flex', alignItems: 'center', pl: 0.5 }}>
+                        <FormControlLabel
+                          control={
+                            <Checkbox
+                              checked={!!m.supports_images}
+                              onChange={(e) => {
+                                const nextModels = (cp.models || []).map((mm, i) => i === mIdx ? { ...mm, supports_images: e.target.checked } : mm);
+                                updateProvider({ models: nextModels });
+                              }}
+                              size="small"
+                              sx={{ p: 0 }}
+                            />
+                          }
+                          label="Images"
+                          sx={{ '& .MuiTypography-root': { fontSize: '0.72rem', color: c.text.tertiary } }}
+                        />
+                      </Box>
                       <IconButton
                         onClick={() => removeModel(mIdx)}
                         size="small"

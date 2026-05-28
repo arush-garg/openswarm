@@ -594,6 +594,7 @@ async def list_models():
                 "label": m["label"],
                 "context_window": m.get("context_window", 128_000),
                 "reasoning": bool(m.get("reasoning", False)),
+                "supports_images": bool(m.get("supports_images", False)),
                 "input_cost_per_1m": input_cost,
                 "output_cost_per_1m": output_cost,
                 # Strict free; subscriptions show via the picker's Subscription chip.
@@ -774,6 +775,7 @@ async def list_models():
                 "label": label,
                 "context_window": ctx,
                 "reasoning": bool(m.get("reasoning", False)),
+                "supports_images": bool(m.get("supports_images", False)),
                 "input_cost_per_1m": 0.0,
                 "output_cost_per_1m": 0.0,
                 "is_free": False,
