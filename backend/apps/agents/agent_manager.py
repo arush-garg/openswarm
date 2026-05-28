@@ -126,6 +126,19 @@ def _delete_session_file(session_id: str):
         os.remove(path)
 
 
+def _set_turn_token_totals(session, baseline_input: int, baseline_output: int, turn_input: int, turn_output: int) -> None:
+    """Write cumulative token totals for the current turn.
+
+    session.tokens is treated as a running session total everywhere the UI
+    and compaction logic read it, so each turn must add its usage on top of
+    the baseline captured at turn start.
+    """
+    if not isinstance(getattr(session, "tokens", None), dict):
+        session.tokens = {}
+    session.tokens["input"] = baseline_input + max(0, turn_input)
+    session.tokens["output"] = baseline_output + max(0, turn_output)
+
+
 # Patterns that indicate an upstream transient problem (overload / rate limit /
 # infra blip) — safe to silently retry with backoff. Checked against the
 # stringified exception from claude_agent_sdk / Claude CLI.
@@ -230,10 +243,114 @@ def _load_all_session_data() -> list[tuple[str, dict]]:
     if not os.path.exists(SESSIONS_DIR):
         return results
     for fname in os.listdir(SESSIONS_DIR):
-        if fname.endswith(".json"):
-            with open(os.path.join(SESSIONS_DIR, fname)) as f:
+        if not fname.endswith(".json"):
+            continue
+        path = os.path.join(SESSIONS_DIR, fname)
+        try:
+            with open(path, encoding="utf-8") as f:
                 results.append((fname[:-5], json.load(f)))
+        except Exception:
+            # Skip corrupt or unreadable files; callers expect resilience.
+            logger.debug("Skipping unreadable session file %s", path, exc_info=True)
+            continue
     return results
+
+
+def _match_trusted_bash_command_rule(command: str) -> dict[str, str] | None:
+    """Return the trusted-bash rule that matches `command`, or None."""
+    if not command or not isinstance(command, str):
+        return None
+    normalized = " ".join(command.strip().split())
+    if not normalized:
+        return None
+    # derive command type (first real token sans env assignments and helpers)
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except Exception:
+        tokens = normalized.split()
+    while tokens and re.match(r"^[A-Z_][A-Z0-9_]*=.*", tokens[0]):
+        tokens = tokens[1:]
+    while tokens and tokens[0] in {"sudo", "time", "nice", "env"} and len(tokens) > 1:
+        tokens = tokens[1:]
+    command_type = (tokens[0].split("/")[-1] or tokens[0]).lower() if tokens else ""
+    for rule in load_trusted_bash_commands():
+        kind = rule.get("kind")
+        value = (rule.get("value") or "").strip()
+        if not kind or not value:
+            continue
+        if kind == "exact" and normalized == value:
+            return rule
+        if kind == "prefix" and (normalized == value or normalized.startswith(f"{value} ")):
+            return rule
+        if kind == "type" and command_type and command_type == value.lower():
+            return rule
+    return None
+
+
+def _load_dashboard_session_ids() -> set[str]:
+    session_ids: set[str] = set()
+    if not os.path.exists(DASHBOARDS_DIR):
+        return session_ids
+    for fname in os.listdir(DASHBOARDS_DIR):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(DASHBOARDS_DIR, fname), "r", encoding="utf-8") as f:
+                dashboard = json.load(f)
+        except Exception:
+            continue
+        layout = dashboard.get("layout") or {}
+        cards = layout.get("cards") or {}
+        if isinstance(cards, dict):
+            for k, v in cards.items():
+                session_ids.add(k)
+                if isinstance(v, dict) and "session_id" in v:
+                    session_ids.add(v["session_id"])
+        expanded = layout.get("expanded_session_ids") or dashboard.get("expanded_session_ids") or []
+        if isinstance(expanded, list):
+            for eid in expanded:
+                if isinstance(eid, str):
+                    session_ids.add(eid)
+    return session_ids
+
+
+def _pick_custom_provider_fallback_model(
+    model_or_settings,
+    maybe_model_value: str | None = None,
+) -> str | None:
+    from backend.apps.agents.providers.registry import (
+        _custom_provider_slug_for_lookup,
+        _find_custom_provider_for_value,
+    )
+
+    if isinstance(model_or_settings, str):
+        model_value = model_or_settings
+        global_settings = load_settings()
+    else:
+        global_settings = model_or_settings if model_or_settings is not None else load_settings()
+        model_value = maybe_model_value
+
+    if not isinstance(model_value, str) or not model_value.startswith("custom/"):
+        return None
+
+    # current provider slug
+    rest = model_value[len("custom/"):]
+    cur_slug, _sep, cur_model = rest.partition("/")
+
+    # pick another provider from settings.custom_providers
+    for cp in getattr(global_settings, "custom_providers", []) or []:
+        slug = _custom_provider_slug_for_lookup(getattr(cp, "name", ""))
+        if slug and slug != cur_slug:
+            # choose first model from that provider
+            models = getattr(cp, "models", []) or []
+            if not models:
+                continue
+            first = models[0]
+            val = first.get("value") if isinstance(first, dict) else getattr(first, "value", None)
+            if not val:
+                continue
+            return f"custom/{slug}/{val}"
+    return None
 
 FULL_TOOLS = [
     "Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion",
@@ -1922,6 +2039,49 @@ class AgentManager:
             )
             _api_route_provider = (_model_entry or {}).get("api") if _is_pinned_api_route else None
 
+            def _custom_provider_env_for_model(
+                model_value: str,
+                global_settings=None,
+                resolved_model: str | None = None,
+            ) -> dict[str, str] | None:
+                from backend.apps.agents.providers.registry import _find_custom_provider_for_value
+
+                if global_settings is None:
+                    global_settings = load_settings()
+
+                cp = _find_custom_provider_for_value(global_settings, model_value)
+                if not cp:
+                    return None
+
+                env = {
+                    "ANTHROPIC_API_KEY": "9router",
+                    "ANTHROPIC_BASE_URL": "http://localhost:20128",
+                    "ENABLE_TOOL_SEARCH": "auto",
+                }
+                # Local OpenAI-compatible servers (LM Studio, Ollama, ...)
+                # often run with auth disabled — the user leaves api_key
+                # blank in Settings. The OpenAI-style SDK insists on a
+                # non-empty key; substitute a harmless placeholder so the
+                # CLI can issue requests. Servers that do check auth always
+                # have a real key configured.
+                env["OPENAI_API_KEY"] = (getattr(cp, "api_key", "") or "").strip() or "no-auth-required"
+                env["OPENAI_BASE_URL"] = getattr(cp, "base_url", "") or ""
+
+                # Pin subagent ids. If the user also has a native Anthropic
+                # path, we keep the subagents on the Claude lane; otherwise
+                # keep them on the same custom endpoint so the retry doesn't
+                # hop back to an unrelated provider.
+                if getattr(global_settings, "anthropic_api_key", None):
+                    env["CLAUDE_CODE_SUBAGENT_MODEL"] = "claude-sonnet-4-6"
+                    env["ANTHROPIC_SMALL_FAST_MODEL"] = "claude-haiku-4-5-20251001"
+                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "claude-haiku-4-5-20251001"
+                else:
+                    model = resolved_model or model_value
+                    env["CLAUDE_CODE_SUBAGENT_MODEL"] = model
+                    env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+                    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+                return env
+
             if _is_pinned_api_route and _api_route_provider == "anthropic" and getattr(global_settings, "anthropic_api_key", None):
                 options_kwargs["env"] = {
                     "ANTHROPIC_API_KEY": global_settings.anthropic_api_key,
@@ -3283,13 +3443,15 @@ class AgentManager:
                         _current_turn_emitted = False
                         await asyncio.sleep(wait)
                         _stderr_buffer.clear()
-                        if current_stage == 0:
-                            if session.sdk_session_id:
-                                options_kwargs["resume"] = session.sdk_session_id
-                            else:
-                                options_kwargs.pop("resume", None)
-                            options = ClaudeAgentOptions(**options_kwargs)
-                            continue
+                        # On transient upstream error, try to resume the
+                        # previous SDK session if we have one; otherwise
+                        # clear resume and retry from scratch.
+                        if session.sdk_session_id:
+                            options_kwargs["resume"] = session.sdk_session_id
+                        else:
+                            options_kwargs.pop("resume", None)
+                        options = ClaudeAgentOptions(**options_kwargs)
+                        continue
 
                         fallback_model = _pick_custom_provider_fallback_model(session.model)
                         if fallback_model and fallback_model != session.model:

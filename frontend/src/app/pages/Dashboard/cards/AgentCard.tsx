@@ -630,6 +630,9 @@ const AgentCard: React.FC<Props> = ({
       : '';
   const hasPending = session.pending_approvals.length > 0;
   const pendingReq = session.pending_approvals[0];
+  const showSinglePendingNonBash = session.pending_approvals.length === 1 && pendingReq?.tool_name !== 'Bash';
+  const showSinglePendingBash = session.pending_approvals.length === 1 && pendingReq?.tool_name === 'Bash';
+  const pendingMcp = pendingReq ? parseMcpToolName(pendingReq.tool_name) : { isMcp: false, service: undefined as undefined | string };
   const statusStyle = STATUS_COLORS[session.status] || { color: c.text.tertiary, bg: c.bg.secondary };
 
   const noTransition = isDragging || isResizing || (isSelected && !!multiDragDelta);
@@ -1083,7 +1086,7 @@ const AgentCard: React.FC<Props> = ({
             autoFocus={autoFocusInput}
             isGlowing={isGlowingRedux && !glowFading}
             onDismissGlow={dismissGlow}
-            onBranch={onBranch ? (newId: string) => onBranch(session.id, newId) : undefined}
+            onBranch={onBranch ? (newId) => onBranch(session.id, newId) : undefined}
           />
         </Box>
       )}
@@ -1126,159 +1129,155 @@ const AgentCard: React.FC<Props> = ({
             </Box>
           )}
 
-          {hasPending && pendingReq && pendingReq.tool_name === 'AskUserQuestion' ? (
-            <Box onClick={(e) => e.stopPropagation()}>
-              <QuestionForm
-                compact
-                request={pendingReq}
-                onApprove={(requestId, updatedInput) =>
-                  dispatch(handleApproval({ requestId, behavior: 'allow', updatedInput }))
-                }
-                onDeny={(requestId) =>
-                  dispatch(handleApproval({ requestId, behavior: 'deny' }))
-                }
-              />
-            </Box>
-          ) : hasPending ? (
+          {hasPending && pendingReq ? (
             <Box onClick={(e) => e.stopPropagation()} sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-              {pendingReq && (
-                <Box
-                  sx={{
-                    bgcolor: c.status.warningBg,
-                    border: `1px solid rgba(128,92,31,0.2)`,
-                    borderRadius: 2,
-                    p: 1,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                  }}
-                >
-                  <Box sx={{ minWidth: 0, flex: 1, display: 'flex', alignItems: 'center', gap: 0.75 }}>
-                    {(() => {
-                      const mcp = parseMcpToolName(pendingReq.tool_name);
-                      if (mcp.isMcp && mcp.service) return <GoogleServiceIcon service={mcp.service} size={18} />;
-                      return <TerminalIcon sx={{ fontSize: 16, color: c.status.warning, flexShrink: 0, opacity: 0.8 }} />;
-                    })()}
-                    <Box sx={{ minWidth: 0, flex: 1 }}>
-                      <Typography sx={{ color: c.status.warning, fontSize: '0.75rem', fontWeight: 600 }}>
-                        {getToolDisplayName(pendingReq.tool_name)}
-                      </Typography>
-                      <Typography
-                        sx={{
-                          color: c.text.muted,
-                          fontSize: '0.7rem',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {summarizeToolInput(pendingReq.tool_name, pendingReq.tool_input)}
-                      </Typography>
+              {pendingReq.tool_name === 'AskUserQuestion' ? (
+                <QuestionForm
+                  compact
+                  request={pendingReq}
+                  onApprove={(requestId, updatedInput) => dispatch(handleApproval({ requestId, behavior: 'allow', updatedInput }))}
+                  onDeny={(requestId) => dispatch(handleApproval({ requestId, behavior: 'deny' }))}
+                />
+              ) : (
+                <>
+                  <Box
+                    sx={{
+                      bgcolor: c.status.warningBg,
+                      border: `1px solid rgba(128,92,31,0.2)`,
+                      borderRadius: 2,
+                      p: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <Box sx={{ minWidth: 0, flex: 1, display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                      {pendingMcp.isMcp && pendingMcp.service ? (
+                        <GoogleServiceIcon service={pendingMcp.service} size={18} />
+                      ) : (
+                        <TerminalIcon sx={{ fontSize: 16, color: c.status.warning, flexShrink: 0, opacity: 0.8 }} />
+                      )}
+                      <Box sx={{ minWidth: 0, flex: 1 }}>
+                        <Typography sx={{ color: c.status.warning, fontSize: '0.75rem', fontWeight: 600 }}>
+                          {getToolDisplayName(pendingReq.tool_name)}
+                        </Typography>
+                        <Typography
+                          sx={{
+                            color: c.text.muted,
+                            fontSize: '0.7rem',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {summarizeToolInput(pendingReq.tool_name, pendingReq.tool_input)}
+                        </Typography>
+                      </Box>
                     </Box>
+                    {showSinglePendingNonBash && (
+                      <Box sx={{ display: 'flex', gap: 0.5, ml: 1 }}>
+                        <Tooltip title="Approve">
+                          <IconButton
+                            size="small"
+                            onClick={() => dispatch(handleApproval({ requestId: pendingReq.id, behavior: 'allow' }))}
+                            sx={{ color: c.status.success }}
+                          >
+                            <CheckCircleIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                        <Tooltip title="Deny">
+                          <IconButton
+                            size="small"
+                            onClick={() => dispatch(handleApproval({ requestId: pendingReq.id, behavior: 'deny' }))}
+                            sx={{ color: c.status.error }}
+                          >
+                            <CancelIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </Box>
+                    )}
                   </Box>
-                  {session.pending_approvals.length === 1 && pendingReq.tool_name !== 'Bash' && (
-                    <Box sx={{ display: 'flex', gap: 0.5, ml: 1 }}>
-                      <Tooltip title="Approve">
-                        <IconButton
-                          size="small"
-                          onClick={() => dispatch(handleApproval({ requestId: pendingReq.id, behavior: 'allow' }))}
-                          sx={{ color: c.status.success }}
-                        >
-                          <CheckCircleIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                      <Tooltip title="Deny">
-                        <IconButton
-                          size="small"
-                          onClick={() => dispatch(handleApproval({ requestId: pendingReq.id, behavior: 'deny' }))}
-                          sx={{ color: c.status.error }}
-                        >
-                          <CancelIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
+
+                  {showSinglePendingBash && (
+                    <Box onClick={(e) => e.stopPropagation()} sx={{ mt: 1 }}>
+                      <ApprovalBar
+                        request={pendingReq}
+                        onApprove={(requestId, updatedInput, trustPattern, trustCommandMode) =>
+                          dispatch(handleApproval({ requestId, behavior: 'allow', updatedInput, trustPattern, trustCommandMode }))
+                        }
+                        onDeny={(requestId, message) => dispatch(handleApproval({ requestId, behavior: 'deny', message }))}
+                      />
                     </Box>
                   )}
-                </Box>
-                {session.pending_approvals.length === 1 && pendingReq.tool_name === 'Bash' && (
-                  <Box onClick={(e) => e.stopPropagation()} sx={{ mt: 1 }}>
-                    <ApprovalBar
-                      request={pendingReq}
-                      onApprove={(requestId, updatedInput, trustPattern, trustCommandMode) =>
-                        dispatch(handleApproval({ requestId, behavior: 'allow', updatedInput, trustPattern, trustCommandMode }))
-                      }
-                      onDeny={(requestId, message) =>
-                        dispatch(handleApproval({ requestId, behavior: 'deny', message }))
-                      }
-                    />
-                  </Box>
-                )}
-              )}
-              {session.pending_approvals.length > 1 && (
-                <Box
-                  sx={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 1,
-                    bgcolor: c.status.warningBg,
-                    border: `1px solid rgba(128,92,31,0.2)`,
-                    borderRadius: 2,
-                    px: 1.25,
-                    py: 0.75,
-                  }}
-                >
-                  <Typography sx={{ fontSize: '0.75rem', fontWeight: 700, color: c.status.warning, flex: 1 }}>
-                    {session.pending_approvals.length} pending approvals
-                  </Typography>
-                  <Button
-                    variant="contained"
-                    size="small"
-                    startIcon={<CheckIcon sx={{ fontSize: '14px !important' }} />}
-                    onClick={() => {
-                      for (const req of session.pending_approvals) {
-                        if (req.tool_name !== 'AskUserQuestion') dispatch(handleApproval({ requestId: req.id, behavior: 'allow' }));
-                      }
-                    }}
-                    sx={{
-                      bgcolor: c.status.success,
-                      '&:hover': { bgcolor: '#1e4d15' },
-                      fontWeight: 600,
-                      fontSize: '0.72rem',
-                      textTransform: 'none',
-                      borderRadius: 1.5,
-                      px: 1.25,
-                      py: 0.25,
-                      minHeight: 26,
-                      minWidth: 0,
-                    }}
-                  >
-                    Approve All
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<CloseIcon sx={{ fontSize: '14px !important' }} />}
-                    onClick={() => {
-                      for (const req of session.pending_approvals) {
-                        if (req.tool_name !== 'AskUserQuestion') dispatch(handleApproval({ requestId: req.id, behavior: 'deny' }));
-                      }
-                    }}
-                    sx={{
-                      borderColor: c.status.error,
-                      color: c.status.error,
-                      '&:hover': { borderColor: '#8f2828', bgcolor: 'rgba(181,51,51,0.04)' },
-                      fontWeight: 600,
-                      fontSize: '0.72rem',
-                      textTransform: 'none',
-                      borderRadius: 1.5,
-                      px: 1.25,
-                      py: 0.25,
-                      minHeight: 26,
-                      minWidth: 0,
-                    }}
-                  >
-                    Deny All
-                  </Button>
-                </Box>
+
+                  {session.pending_approvals.length > 1 && (
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 1,
+                        bgcolor: c.status.warningBg,
+                        border: `1px solid rgba(128,92,31,0.2)`,
+                        borderRadius: 2,
+                        px: 1.25,
+                        py: 0.75,
+                      }}
+                    >
+                      <Typography sx={{ fontSize: '0.75rem', fontWeight: 700, color: c.status.warning, flex: 1 }}>
+                        {session.pending_approvals.length} pending approvals
+                      </Typography>
+                      <Button
+                        variant="contained"
+                        size="small"
+                        startIcon={<CheckIcon sx={{ fontSize: '14px !important' }} />}
+                        onClick={() => {
+                          for (const req of session.pending_approvals) {
+                            if (req.tool_name !== 'AskUserQuestion') dispatch(handleApproval({ requestId: req.id, behavior: 'allow' }));
+                          }
+                        }}
+                        sx={{
+                          bgcolor: c.status.success,
+                          '&:hover': { bgcolor: '#1e4d15' },
+                          fontWeight: 600,
+                          fontSize: '0.72rem',
+                          textTransform: 'none',
+                          borderRadius: 1.5,
+                          px: 1.25,
+                          py: 0.25,
+                          minHeight: 26,
+                          minWidth: 0,
+                        }}
+                      >
+                        Approve All
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        startIcon={<CloseIcon sx={{ fontSize: '14px !important' }} />}
+                        onClick={() => {
+                          for (const req of session.pending_approvals) {
+                            if (req.tool_name !== 'AskUserQuestion') dispatch(handleApproval({ requestId: req.id, behavior: 'deny' }));
+                          }
+                        }}
+                        sx={{
+                          borderColor: c.status.error,
+                          color: c.status.error,
+                          '&:hover': { borderColor: '#8f2828', bgcolor: 'rgba(181,51,51,0.04)' },
+                          fontWeight: 600,
+                          fontSize: '0.72rem',
+                          textTransform: 'none',
+                          borderRadius: 1.5,
+                          px: 1.25,
+                          py: 0.25,
+                          minHeight: 26,
+                          minWidth: 0,
+                        }}
+                      >
+                        Deny All
+                      </Button>
+                    </Box>
+                  )}
+                </>
               )}
             </Box>
           ) : null}

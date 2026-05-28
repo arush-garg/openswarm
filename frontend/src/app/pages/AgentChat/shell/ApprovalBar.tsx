@@ -29,7 +29,7 @@ import { ApprovalRequest } from '@/shared/state/agentsSlice';
 import { useAppSelector } from '@/shared/hooks';
 import { ToolDefinition } from '@/shared/state/toolsSlice';
 import { useClaudeTokens } from '@/shared/styles/ThemeContext';
-import { bashCommandType } from './toolLabels';
+import { bashCommandType } from '../parsing/toolLabels';
 
 interface IntegrationMeta {
   label: string;

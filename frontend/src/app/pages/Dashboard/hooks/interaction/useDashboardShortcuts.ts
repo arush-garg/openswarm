@@ -25,6 +25,7 @@ export function useDashboardShortcuts({
   const dispatch = useAppDispatch();
 
   useEffect(() => {
+    if (!newAgentShortcut || typeof newAgentShortcut !== 'string') return;
     const parts = newAgentShortcut.toLowerCase().split('+');
     const key = parts[parts.length - 1];
     const needsMeta = parts.includes('meta');
@@ -34,7 +35,8 @@ export function useDashboardShortcuts({
 
     const handleShortcut = (e: KeyboardEvent) => {
       if (!isActive) return;  // Don't fire shortcuts when dashboard is hidden
-      if (e.key.toLowerCase() !== key) return;
+      const evKey = (e.key || '').toLowerCase();
+      if (!evKey || evKey !== key) return;
       if (needsMeta !== e.metaKey) return;
       if (needsCtrl !== e.ctrlKey) return;
       if (needsShift !== e.shiftKey) return;
@@ -91,7 +93,7 @@ export function useDashboardShortcuts({
   useEffect(() => {
     const handleSearch = (e: KeyboardEvent) => {
       if (!isActive) return;  // Don't fire shortcuts when dashboard is hidden
-      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'f') return;
+        if (!(e.metaKey || e.ctrlKey) || !(e.key || '').toLowerCase().startsWith('f')) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable) return;
       e.preventDefault();
