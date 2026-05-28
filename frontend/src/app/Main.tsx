@@ -219,7 +219,15 @@ const SettingsLoader: React.FC<{ children: React.ReactNode }> = ({ children }) =
   }, [dispatch]);
 
   useEffect(() => {
-    const onFocus = () => { dispatch(fetchSettings()); };
+    const onFocus = () => {
+      dispatch(fetchSettings());
+      // After returning from a Stripe checkout tab the deep-link (openswarm://)
+      // is never caught in browser mode, so trigger a sync that will detect
+      // any plan upgrade and flip to Pro automatically.
+      fetch(`${API_BASE}/subscription/sync`, { method: 'POST' })
+        .then((r) => { if (r.ok) dispatch(fetchSettings()); })
+        .catch(() => {});
+    };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
   }, [dispatch]);

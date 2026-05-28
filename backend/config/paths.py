@@ -38,3 +38,4 @@ BACKEND_DIR = _BACKEND_DIR
 
 # Durable workflow/task storage
 TASKS_DIR = os.path.join(DATA_ROOT, "tasks")
+CRON_JOBS_DIR = os.path.join(DATA_ROOT, "cron_jobs")

@@ -27,6 +27,7 @@ from backend.apps.mcp_registry.mcp_registry import mcp_registry
 from backend.apps.skill_registry.skill_registry import skill_registry
 from backend.apps.outputs.outputs import outputs
 from backend.apps.dashboards.dashboards import dashboards
+from backend.apps.cron.cron import cron
 from backend.apps.service.service import service
 from backend.apps.subscription.router import subscription
 from backend.apps.auth.router import auth
@@ -36,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import WebSocket, WebSocketDisconnect
 import json
 
-main_app = MainApp([health, agents, skills, tools_lib, modes, settings, mcp_registry, skill_registry, outputs, dashboards, service, subscription, auth, web, anthropic_proxy])
+main_app = MainApp([health, agents, skills, tools_lib, modes, settings, mcp_registry, skill_registry, outputs, dashboards, cron, service, subscription, auth, web, anthropic_proxy])
 app = main_app.app
 
 # Generate per-install auth token BEFORE we bind the HTTP port. By the

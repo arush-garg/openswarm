@@ -734,6 +734,7 @@ class AgentManager:
             repo_url=repo_url,
             branch=branch_name,
             dashboard_id=config.dashboard_id,
+            active_mcps=list(getattr(config, "active_mcps", []) or []),
             thinking_level=getattr(global_settings, "default_thinking_level", "auto"),
         )
         _apply_context_window(session, global_settings)

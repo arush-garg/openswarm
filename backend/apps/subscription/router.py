@@ -247,7 +247,45 @@ async def sync():
     bearer = getattr(settings_obj, "openswarm_bearer_token", None)
     mode = getattr(settings_obj, "connection_mode", "own_key")
 
-    if mode != "openswarm-pro" or not bearer:
+    if mode != "openswarm-pro":
+        # In browser mode the Stripe deep-link (openswarm://) is never caught, so
+        # the subscription activation event is silently dropped. Detect the upgrade
+        # here: if the user has signed in (bearer exists) but hasn't flipped to
+        # Pro yet, probe GET /api/me and activate automatically when the plan is paid.
+        if bearer:
+            try:
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    me_r = await client.get(
+                        f"{_proxy_url()}/api/me",
+                        headers={"Authorization": f"Bearer {bearer}"},
+                    )
+                if me_r.status_code == 200:
+                    me = me_r.json()
+                    plan = me.get("plan")
+                    if plan and plan != "free":
+                        settings_obj.connection_mode = "openswarm-pro"
+                        settings_obj.openswarm_subscription_plan = plan
+                        settings_obj.openswarm_proxy_url = _proxy_url()
+                        period_end = me.get("current_period_end")
+                        if isinstance(period_end, (int, float)) and period_end > 0:
+                            from datetime import datetime, timezone
+                            settings_obj.openswarm_subscription_expires = (
+                                datetime.fromtimestamp(period_end / 1000, tz=timezone.utc).isoformat()
+                            )
+                        usage = me.get("usage")
+                        if isinstance(usage, dict):
+                            settings_obj.openswarm_usage_cached = usage
+                        await save_settings_async(settings_obj)
+                        _sync_subscription_identity(settings_obj)
+                        _sync(settings_obj.model_dump())
+                        return {
+                            "ok": True,
+                            "synced": True,
+                            "connection_mode": "openswarm-pro",
+                            "plan": plan,
+                        }
+            except httpx.HTTPError as e:
+                logger.debug("subscription/sync upgrade check failed: %s", e)
         _sync(settings_obj.model_dump())
         return {"ok": True, "synced": False, "connection_mode": mode}
 

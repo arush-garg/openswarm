@@ -10,6 +10,7 @@ class AgentConfig(BaseModel):
     provider: str = "anthropic"
     system_prompt: Optional[str] = None
     allowed_tools: list[str] = Field(default_factory=lambda: ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion"])
+    active_mcps: list[str] = Field(default_factory=list)
     max_turns: Optional[int] = None
     target_directory: Optional[str] = None
     dashboard_id: Optional[str] = None

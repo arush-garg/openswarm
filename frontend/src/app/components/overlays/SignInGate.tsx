@@ -50,7 +50,10 @@ export default function SignInGate(): JSX.Element {
     if (api?.openExternal) {
       api.openExternal(startUrl);
     } else {
-      window.open(startUrl, '_blank');
+      // Open as a popup so window.opener is set for the cloud's bearer-handoff
+      // page to postMessage back; a background _blank tab loses opener in some
+      // browsers. The useDeepLink browser-mode listener catches the callback.
+      window.open(startUrl, 'openswarm_google_signin', 'width=600,height=700,popup=yes');
     }
   };
 

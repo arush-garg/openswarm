@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useAppDispatch } from '@/shared/hooks';
-import { activateSubscription, activateSignin } from '@/shared/state/settingsSlice';
+import { activateSubscription, activateSignin, fetchSettings } from '@/shared/state/settingsSlice';
 import { fetchModels } from '@/shared/state/modelsSlice';
 import { fetchTools } from '@/shared/state/toolsSlice';
 import { API_BASE } from '@/shared/config';
@@ -9,6 +9,50 @@ import { report } from '@/shared/serviceClient';
 /** Subscribe to openswarm:// auth/oauth deep-links from Electron main; no-op in browser. */
 export function useDeepLink(): void {
   const dispatch = useAppDispatch();
+
+  // Browser mode: no Electron bridge, so listen for postMessages from popup windows
+  // opened during sign-in / subscribe flows. The cloud's bearer-handoff page and the
+  // local Google OAuth callback both use window.opener.postMessage({type:"oauth_callback"}).
+  useEffect(() => {
+    if ((window as any).openswarm) return;
+
+    const handleMessage = (event: MessageEvent) => {
+      const d = event.data;
+      if (!d || typeof d !== 'object' || d.type !== 'oauth_callback') return;
+      const data = d.data ?? {};
+      if (!data.ok) return;
+
+      if (data.bearer) {
+        // Cloud handoff page included a bearer — activate sign-in or subscription.
+        if (data.signin) {
+          report('signin', 'browser_postmessage_received', { method: data.signin_method ?? 'google' });
+          dispatch(activateSignin({
+            token: data.bearer,
+            signin_method: data.signin_method ?? 'google',
+            email: data.email ?? null,
+          })).unwrap()
+            .then(() => { dispatch(fetchModels()); })
+            .catch(() => {});
+        } else if (data.plan) {
+          report('subscription', 'browser_postmessage_received', { plan: data.plan });
+          dispatch(activateSubscription({
+            token: data.bearer,
+            plan: data.plan,
+            expires: data.expires ?? null,
+          })).unwrap()
+            .then(() => { dispatch(fetchModels()); })
+            .catch(() => {});
+        }
+      } else {
+        // No bearer — the cloud POST'd to signin-activate directly; just refresh
+        // settings so the gate / Pro badge picks up any changes within one poll cycle.
+        dispatch(fetchSettings());
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [dispatch]);
 
   useEffect(() => {
     const api = (window as any).openswarm as OpenSwarmAPI | undefined;
