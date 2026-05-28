@@ -42,6 +42,10 @@ class ApprovalResponse(BaseModel):
     # (from ApprovalRequest.sensitive_pattern) to disk so future writes
     # against the same pattern skip the modal.
     trust_pattern: bool = False
+    # Bash-only allowlist selector. "exact" stores the whole command,
+    # "prefix" stores the current command as a prefix, and "type"
+    # stores the executable name (e.g. ls, grep).
+    trust_command_mode: Optional[Literal["exact", "prefix", "type"]] = None
 
 class Message(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)

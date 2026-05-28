@@ -501,8 +501,13 @@ const AgentChat: React.FC<AgentChatProps> = ({ sessionId: sessionIdProp, onClose
     if (!isDraft) dispatch(updateThinkingLevel({ sessionId: id, level }));
   }, [id, isDraft, dispatch]);
 
-  const handleApprove = (requestId: string, updatedInput?: Record<string, any>, trustPattern?: boolean) => {
-    dispatch(handleApproval({ requestId, behavior: 'allow', updatedInput, trustPattern }));
+  const handleApprove = (
+    requestId: string,
+    updatedInput?: Record<string, any>,
+    trustPattern?: boolean,
+    trustCommandMode?: 'exact' | 'prefix' | 'type',
+  ) => {
+    dispatch(handleApproval({ requestId, behavior: 'allow', updatedInput, trustPattern, trustCommandMode }));
   };
 
   const handleDeny = (requestId: string, message?: string) => {

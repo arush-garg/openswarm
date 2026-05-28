@@ -224,6 +224,7 @@ async def websocket_session(websocket: WebSocket, session_id: str):
                     "message": payload.get("message"),
                     "updated_input": payload.get("updated_input"),
                     "trust_pattern": bool(payload.get("trust_pattern")),
+                    "trust_command_mode": payload.get("trust_command_mode"),
                 })
             elif event == "agent:edit_message":
                 from backend.apps.agents.agent_manager import agent_manager
@@ -370,6 +371,7 @@ async def websocket_dashboard(websocket: WebSocket):
                     "message": payload.get("message"),
                     "updated_input": payload.get("updated_input"),
                     "trust_pattern": bool(payload.get("trust_pattern")),
+                    "trust_command_mode": payload.get("trust_command_mode"),
                 })
             elif event == "browser:result":
                 ws_manager.resolve_browser_command(

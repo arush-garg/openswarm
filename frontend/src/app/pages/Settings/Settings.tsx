@@ -56,6 +56,7 @@ import { fetchModes } from '@/shared/state/modesSlice';
 import { useClaudeTokens, useThemeMode } from '@/shared/styles/ThemeContext';
 import DirectoryBrowser from '@/app/components/DirectoryBrowser';
 import TrustedFilePatterns from '@/app/components/TrustedFilePatterns';
+import TrustedBashCommands from '@/app/components/TrustedBashCommands';
 import { CommandsContent } from '@/app/pages/Commands/Commands';
 import { API_BASE } from '@/shared/config';
 import PlanPicker from '@/app/components/PlanPicker';
@@ -2196,6 +2197,8 @@ const Settings: React.FC = () => {
         </Box>
 
         <TrustedFilePatterns />
+
+        <TrustedBashCommands />
 
 
         <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

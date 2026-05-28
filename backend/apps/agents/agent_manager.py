@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import re
 import sys
 import time
@@ -20,10 +21,12 @@ from backend.apps.tools_lib.tools_lib import (
     _sanitize_server_name,
     derive_mcp_config,
     load_builtin_permissions,
+    load_trusted_bash_commands,
     load_trusted_sensitive_paths,
     refresh_airtable_token,
     refresh_google_token,
     refresh_hubspot_token,
+    save_trusted_bash_commands,
     save_trusted_sensitive_paths,
 )
 from backend.config.paths import SESSIONS_DIR
@@ -171,6 +174,49 @@ def _is_transient_capacity_error(exc: BaseException, extra_text: str = "") -> bo
     if re.search(r"no\s+pool\s+capacity", combined, re.IGNORECASE):
         return True
     return False
+
+
+def _normalize_bash_command(command: str) -> str:
+    return " ".join(command.strip().split()) if isinstance(command, str) else ""
+
+
+def _extract_bash_command_type(command: str) -> str:
+    if not command or not isinstance(command, str):
+        return ""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except Exception:
+        tokens = command.strip().split()
+    if not tokens:
+        return ""
+    while tokens and re.match(r"^[A-Z_][A-Z0-9_]*=.*", tokens[0]):
+        tokens = tokens[1:]
+    while tokens and tokens[0] in {"sudo", "time", "nice", "env"} and len(tokens) > 1:
+        tokens = tokens[1:]
+    if not tokens:
+        return ""
+    return (tokens[0].split("/")[-1] or tokens[0]).lower()
+
+
+def _match_trusted_bash_command_rule(command: str) -> dict[str, str] | None:
+    if not command or not isinstance(command, str):
+        return None
+    normalized = _normalize_bash_command(command)
+    if not normalized:
+        return None
+    command_type = _extract_bash_command_type(normalized)
+    for rule in load_trusted_bash_commands():
+        kind = rule.get("kind")
+        value = _normalize_bash_command(rule.get("value") or "")
+        if not kind or not value:
+            continue
+        if kind == "exact" and normalized == value:
+            return rule
+        if kind == "prefix" and (normalized == value or normalized.startswith(f"{value} ")):
+            return rule
+        if kind == "type" and command_type and command_type == value.lower():
+            return rule
+    return None
 
 
 def _load_all_session_data() -> list[tuple[str, dict]]:
@@ -1293,6 +1339,46 @@ class AgentManager:
         }
         _BASH_CATASTROPHIC_PATTERNS = tuple(_BASH_CATASTROPHIC_INFO.keys())
 
+        def _normalize_bash_command(command: str) -> str:
+            return " ".join(command.strip().split())
+
+        def _extract_bash_command_type(command: str) -> str:
+            if not command or not isinstance(command, str):
+                return ""
+            try:
+                tokens = shlex.split(command, posix=True)
+            except Exception:
+                tokens = command.strip().split()
+            if not tokens:
+                return ""
+            while tokens and re.match(r"^[A-Z_][A-Z0-9_]*=.*", tokens[0]):
+                tokens = tokens[1:]
+            while tokens and tokens[0] in {"sudo", "time", "nice", "env"} and len(tokens) > 1:
+                tokens = tokens[1:]
+            if not tokens:
+                return ""
+            return (tokens[0].split("/")[-1] or tokens[0]).lower()
+
+        def _match_trusted_bash_command(command: str) -> dict[str, str] | None:
+            if not command or not isinstance(command, str):
+                return None
+            normalized = _normalize_bash_command(command)
+            if not normalized:
+                return None
+            command_type = _extract_bash_command_type(normalized)
+            for rule in load_trusted_bash_commands():
+                kind = rule.get("kind")
+                value = _normalize_bash_command(rule.get("value") or "")
+                if not kind or not value:
+                    continue
+                if kind == "exact" and normalized == value:
+                    return rule
+                if kind == "prefix" and (normalized == value or normalized.startswith(f"{value} ")):
+                    return rule
+                if kind == "type" and command_type and command_type == value.lower():
+                    return rule
+            return None
+
         # Token-extraction regex: pulls quoted strings AND bare path-like
         # tokens out of the Bash command so we can match against the
         # catastrophic list. Intentionally loose: false positives just
@@ -1368,7 +1454,11 @@ class AgentManager:
             if tool_name == "Bash" and _looks_like_os_scheduling(tool_input):
                 return "ask", None
             if tool_name == "Bash" and isinstance(tool_input, dict):
-                bash_match = _match_bash_catastrophic_pattern(str(tool_input.get("command") or ""))
+                bash_command = str(tool_input.get("command") or "")
+                trusted_bash_rule = _match_trusted_bash_command(bash_command)
+                if trusted_bash_rule:
+                    return "always_allow", None
+                bash_match = _match_bash_catastrophic_pattern(bash_command)
                 if bash_match:
                     return "ask", bash_match
             if policy != "always_allow" or tool_name not in _PATH_GATED_TOOLS:
@@ -1457,6 +1547,32 @@ class AgentManager:
                         save_trusted_sensitive_paths(existing)
                 except Exception:
                     logger.exception("Failed to persist trusted sensitive path")
+
+            if (
+                decision.get("behavior") == "allow"
+                and decision.get("trust_command_mode")
+                and tool_name == "Bash"
+                and isinstance(safe_input, dict)
+            ):
+                try:
+                    command = str(safe_input.get("command") or "")
+                    normalized_command = _normalize_bash_command(command)
+                    if normalized_command:
+                        mode = str(decision.get("trust_command_mode") or "").lower()
+                        rule: dict[str, str] | None = None
+                        if mode in {"exact", "prefix"}:
+                            rule = {"kind": mode, "value": normalized_command}
+                        elif mode == "type":
+                            command_type = _extract_bash_command_type(normalized_command)
+                            if command_type:
+                                rule = {"kind": "type", "value": command_type}
+                        if rule:
+                            existing_rules = load_trusted_bash_commands()
+                            if rule not in existing_rules:
+                                existing_rules.append(rule)
+                                save_trusted_bash_commands(existing_rules)
+                except Exception:
+                    logger.exception("Failed to persist trusted Bash command")
 
             approval_latency_ms = int((datetime.now() - approval_req.created_at).total_seconds() * 1000)
             try:

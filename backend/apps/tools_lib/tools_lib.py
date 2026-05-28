@@ -26,7 +26,7 @@ OPENSWARM_OAUTH_BASE_URL = os.environ.get(
     "OPENSWARM_OAUTH_BASE_URL", "https://api.openswarm.com"
 ).rstrip("/")
 
-from backend.config.paths import BACKEND_DIR, DATA_ROOT, TOOLS_DIR as DATA_DIR, BUILTIN_PERMISSIONS_PATH as BUILTIN_PERMS_PATH, TRUSTED_SENSITIVE_PATHS_PATH
+from backend.config.paths import BACKEND_DIR, DATA_ROOT, TOOLS_DIR as DATA_DIR, BUILTIN_PERMISSIONS_PATH as BUILTIN_PERMS_PATH, TRUSTED_SENSITIVE_PATHS_PATH, TRUSTED_BASH_COMMANDS_PATH
 
 load_dotenv(os.path.join(BACKEND_DIR, ".env"))
 if os.environ.get("OPENSWARM_PACKAGED") == "1":
@@ -129,6 +129,50 @@ def save_trusted_sensitive_paths(patterns: list[str]):
         json.dump({"patterns": seen}, f, indent=2)
 
 
+def load_trusted_bash_commands() -> list[dict[str, str]]:
+    if not os.path.exists(TRUSTED_BASH_COMMANDS_PATH):
+        return []
+    try:
+        with open(TRUSTED_BASH_COMMANDS_PATH) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+    raw = data.get("rules") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return []
+    rules: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        value = item.get("value")
+        if kind not in {"exact", "prefix", "type"}:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            continue
+        rules.append({"kind": kind, "value": value.strip()})
+    return rules
+
+
+def save_trusted_bash_commands(rules: list[dict[str, str]]):
+    os.makedirs(os.path.dirname(TRUSTED_BASH_COMMANDS_PATH), exist_ok=True)
+    seen: list[dict[str, str]] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        kind = rule.get("kind")
+        value = rule.get("value")
+        if kind not in {"exact", "prefix", "type"}:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            continue
+        normalized = {"kind": kind, "value": value.strip()}
+        if normalized not in seen:
+            seen.append(normalized)
+    with open(TRUSTED_BASH_COMMANDS_PATH, "w") as f:
+        json.dump({"rules": seen}, f, indent=2)
+
+
 @tools_lib.router.get("/builtin/permissions")
 async def get_builtin_permissions():
     return {"permissions": load_builtin_permissions()}
@@ -148,6 +192,22 @@ async def replace_trusted_sensitive_paths(body: dict):
         return {"patterns": load_trusted_sensitive_paths()}
     save_trusted_sensitive_paths([p for p in incoming if isinstance(p, str) and p])
     return {"patterns": load_trusted_sensitive_paths()}
+
+
+@tools_lib.router.get("/trusted-bash-commands")
+async def get_trusted_bash_commands():
+    """Rules the user has opted into always-allow for Bash command prompts."""
+    return {"rules": load_trusted_bash_commands()}
+
+
+@tools_lib.router.put("/trusted-bash-commands")
+async def replace_trusted_bash_commands(body: dict):
+    """Replace the full list; Settings page uses this to revoke entries."""
+    incoming = body.get("rules") or []
+    if not isinstance(incoming, list):
+        return {"rules": load_trusted_bash_commands()}
+    save_trusted_bash_commands([r for r in incoming if isinstance(r, dict)])
+    return {"rules": load_trusted_bash_commands()}
 
 
 @tools_lib.router.put("/builtin/permissions")
