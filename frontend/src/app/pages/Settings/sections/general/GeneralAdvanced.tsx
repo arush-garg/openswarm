@@ -10,6 +10,7 @@ import { onboardingBus } from '@/app/components/Onboarding/eventBus';
 import { resetTour } from '@/shared/state/onboardingProgressSlice';
 import { useClaudeTokens } from '@/shared/styles/ThemeContext';
 import TrustedFilePatterns from '@/app/components/overlays/TrustedFilePatterns';
+import TrustedBashCommands from '@/app/components/TrustedBashCommands';
 import SoftwareUpdateRow from './SoftwareUpdateRow';
 import type { SettingsStyles } from '../settingsStyles';
 
@@ -73,6 +74,8 @@ const GeneralAdvanced: React.FC<{
       <SoftwareUpdateRow styles={styles} />
 
       <TrustedFilePatterns />
+
+      <TrustedBashCommands />
 
       <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <Box>

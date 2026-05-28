@@ -11,34 +11,35 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse
-from backend.config.Apps import SubApp
-from backend.apps.tools_lib.models import ToolDefinition, ToolCreate, ToolUpdate, BUILTIN_TOOLS
-from backend.config.paths import DATA_ROOT, TOOLS_DIR as DATA_DIR, BUILTIN_PERMISSIONS_PATH as BUILTIN_PERMS_PATH, TRUSTED_SENSITIVE_PATHS_PATH, TRUSTED_BASH_COMMANDS_PATH
 
-# oauth_config runs the dotenv load (leaf) so OPENSWARM_OAUTH_BASE_URL is set
-# before anything reads it; re-exported here for the route handlers below.
-from backend.apps.tools_lib.oauth_config import OPENSWARM_OAUTH_BASE_URL
-# _sanitize_server_name + derive_mcp_config re-exported for agent_manager/main.
+from backend.apps.tools_lib.models import ToolDefinition, ToolCreate, ToolUpdate, BUILTIN_TOOLS
 from backend.apps.tools_lib.mcp_config import _sanitize_server_name, derive_mcp_config
 from backend.apps.tools_lib.mcp_discovery import (
     _discover_mcp_tools_http,
     _discover_mcp_tools_sse,
     _discover_mcp_tools_stdio,
 )
-from backend.apps.tools_lib.tool_taxonomy import _classify_services
-# refresh_* re-exported for agent_manager.
+from backend.apps.tools_lib.oauth_config import OPENSWARM_OAUTH_BASE_URL
 from backend.apps.tools_lib.oauth_tokens import (
     _proxied_provider_for,
     _persist_cloud_tokens,
-    refresh_google_token,
-    refresh_airtable_token,
-    refresh_hubspot_token,
-    _m365_server_script,
     _m365_cache_env,
+    _m365_server_script,
+    refresh_airtable_token,
+    refresh_google_token,
+    refresh_hubspot_token,
+)
+from backend.apps.tools_lib.tool_taxonomy import _classify_services
+from backend.config.Apps import SubApp
+from backend.config.paths import (
+    BUILTIN_PERMISSIONS_PATH as BUILTIN_PERMS_PATH,
+    DATA_ROOT,
+    TOOLS_DIR as DATA_DIR,
+    TRUSTED_BASH_COMMANDS_PATH,
+    TRUSTED_SENSITIVE_PATHS_PATH,
 )
 
 logger = logging.getLogger(__name__)
-
 
 
 @asynccontextmanager

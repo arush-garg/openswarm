@@ -120,6 +120,20 @@ def _apply_context_window(session, settings=None) -> None:
         logger.debug("context_window lookup failed; keeping existing value", exc_info=True)
 
 
+def _save_session(session_id: str, doc_data: dict):
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    with open(os.path.join(SESSIONS_DIR, f"{session_id}.json"), "w") as f:
+        json.dump(doc_data, f, indent=2)
+
+
+def _load_session_data(session_id: str) -> dict | None:
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
 def _delete_session_file(session_id: str):
     path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
     if os.path.exists(path):
